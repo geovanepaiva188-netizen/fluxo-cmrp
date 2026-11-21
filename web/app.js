@@ -52,7 +52,7 @@ onAuthStateChanged(auth, async u => {
   S.user = u; S.perfil = null; S.f = {}; S.tab = "fila";
   if (!u) return telaEntrada("entrar");
   const ref = doc(db, "usuarios", u.uid);
-  S.unsub.push(onSnapshot(ref, snap => {
+  S.unsub.push(onSnapshot(ref, snap => { if (snap.metadata?.hasPendingWrites) return;
     const antes = JSON.stringify(S.perfil && { s: S.perfil.status, p: S.perfil.papel, v: S.perfil.ver, r: S.perfil.rh });
     S.perfil = snap.exists() ? snap.data() : null;
     const depois = JSON.stringify(S.perfil && { s: S.perfil.status, p: S.perfil.papel, v: S.perfil.ver, r: S.perfil.rh });
