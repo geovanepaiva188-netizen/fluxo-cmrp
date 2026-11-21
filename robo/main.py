@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from email import policy
@@ -144,7 +145,8 @@ def ler_conta(cfg, email_conta, senha, estado):
     try:
         M.login(email_conta, senha)
         sent = pasta_enviados(M, imap.get('pastaEnviados'))
-        msgs, novo = [], {}
+        msgs, novo = [], dict(estado or {})
+        limite = time.time() + 300  # no máximo 5 min por conta; o resto fica para a próxima rodada
         desde = datetime.now(TZ) - timedelta(days=int(cfg.get('diasIniciais', 20)))
         for chave_p, nome, tipo in (('INBOX', 'INBOX', 'in'), ('SENT', sent, 'sent')):
             if not nome:
@@ -160,16 +162,30 @@ def ler_conta(cfg, email_conta, senha, estado):
             typ, data = M.uid('SEARCH', None, crit)
             uids = sorted(int(x) for x in (data[0].split() if data and data[0] else []) if int(x) > ultimo)[-MAX_POR_PASTA:]
             log(f'{chave_p}: {len(uids)} e-mails novos')
-            for j in range(0, len(uids), 25):
-                lote = ','.join(str(u) for u in uids[j:j + 25])
-                typ, data = M.uid('FETCH', lote, '(BODY.PEEK[]<0.150000>)')  # só o começo: texto sem anexos pesados
+            feito, parou = ultimo, False
+            for j in range(0, len(uids), 10):
+                parte = uids[j:j + 10]
+                try:
+                    typ, data = M.uid('FETCH', ','.join(map(str, parte)), '(BODY.PEEK[]<0.150000>)')  # só o começo: texto sem anexos pesados
+                except Exception as e:  # servidor cortou a conexão: guarda o que já leu e segue na próxima rodada
+                    log(f'{chave_p}: conexão interrompida ({type(e).__name__}); continua na próxima rodada')
+                    parou = True
+                    break
                 for item in data or []:
                     if isinstance(item, tuple) and len(item) == 2:
                         try:
                             msgs.append(para_msg(item[1], tipo))
                         except Exception:
                             pass
-            novo[chave_p] = {'uidvalidity': uidvalidity, 'ultimoUid': max(uids) if uids else ultimo, 'nome': nome}
+                feito = max(parte)
+                if time.time() > limite:
+                    log(f'{chave_p}: tempo esgotado, continua na próxima rodada')
+                    parou = True
+                    break
+            novo[chave_p] = {'uidvalidity': uidvalidity, 'ultimoUid': feito, 'nome': nome}
+            log(f'{chave_p}: {len([u for u in uids if u <= feito])} lidos')
+            if parou:
+                break
         return msgs, novo
     finally:
         try:
