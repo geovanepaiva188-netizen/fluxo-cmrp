@@ -1,0 +1,10 @@
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+android-app/android/
+android-app/node_modules/
+*.json.key
+sa.json
+historico-fluxo.json
+.firebase/

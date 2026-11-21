@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "processos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "copias", "arrayConfig": "CONTAINS" },
+        { "fieldPath": "rh", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

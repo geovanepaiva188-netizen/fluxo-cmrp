@@ -1,0 +1,12 @@
+{
+  "appId": "br.com.cmrp.fluxo",
+  "appName": "Fluxo CMRP",
+  "webDir": "www",
+  "server": {
+    "url": "https://PROJETO.web.app",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}

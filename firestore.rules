@@ -1,0 +1,129 @@
+rules_version = '2';
+// Regras de segurança do Fluxo CMRP.
+// Princípio: ninguém lê nada sem estar APROVADO pelo administrador (usuarios/{uid}.status == 'ativo').
+// O robô usa a chave de serviço (Admin SDK) e não passa por estas regras.
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    // ---------- funções ----------
+    function signed() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function perfilPath() { return /databases/$(db)/documents/usuarios/$(uid()); }
+    function me() { return get(perfilPath()).data; }
+    function ativo() { return signed() && exists(perfilPath()) && me().status == 'ativo'; }
+    function admin() { return ativo() && me().papel == 'admin'; }
+    function veTudo() { return admin() || me().ver.tudo == true; }
+    function rhOk(d) { return admin() || me().rh == true || d.get('rh', false) == false; }
+    // d = dados do documento (processo, item a responder, máquina)
+    function podeVer(d) {
+      return ativo() && rhOk(d) && (
+        veTudo() ||
+        (me().ver.proprios == true && (d.get('dono', '') == uid() || uid() in d.get('copias', []))) ||
+        (d.get('obra', '') in me().ver.obras)
+      );
+    }
+    function soMuda(campos) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(campos); }
+
+    // ---------- inicialização (primeiro administrador) ----------
+    // O primeiro usuário cadastrado vira administrador. Depois disso, config/inicializado existe e o atalho fecha.
+    match /config/inicializado {
+      allow get: if true;
+      allow create: if signed()
+        && !exists(/databases/$(db)/documents/config/inicializado)
+        && existsAfter(perfilPath())
+        && getAfter(perfilPath()).data.papel == 'admin';
+      allow update, delete: if false;
+    }
+
+    // ---------- usuários ----------
+    match /usuarios/{u} {
+      allow get: if signed() && (u == uid() || admin());
+      allow list: if admin();
+      // pedido de acesso: a própria pessoa cria o seu perfil como PENDENTE, sem permissões
+      allow create: if admin() || signed() && u == uid() && (
+        (
+          request.resource.data.status == 'pendente'
+          && request.resource.data.papel == 'usuario'
+          && request.resource.data.ver == {'proprios': false, 'tudo': false, 'obras': []}
+          && request.resource.data.rh == false
+          && request.resource.data.podeConectar == false
+          && request.resource.data.podeEncerrar == false
+        ) || (
+          // administrador inicial (só enquanto o app não foi inicializado)
+          !exists(/databases/$(db)/documents/config/inicializado)
+          && existsAfter(/databases/$(db)/documents/config/inicializado)
+          && request.resource.data.status == 'ativo'
+          && request.resource.data.papel == 'admin'
+        )
+      );
+      // só o administrador aprova, muda permissões, suspende
+      allow update: if admin() || (u == uid() && ativo() && soMuda(['nome', 'avisos', 'ultimoAcesso']));
+      allow delete: if admin() && u != uid();
+    }
+
+    // ---------- conta LocaWeb conectada (senha já chega CIFRADA com a chave pública do robô) ----------
+    match /contas/{u} {
+      allow get: if signed() && (u == uid() || admin());
+      allow list: if admin();
+      allow create, update: if ativo() && u == uid() && me().podeConectar == true
+        && request.resource.data.keys().hasOnly(['emailLocaweb', 'senhaCifrada', 'conectadoEm', 'incluirCopia', 'estado', 'erro', 'ultimaLeitura', 'pastas'])
+        && request.resource.data.emailLocaweb is string
+        && request.resource.data.senhaCifrada is string;
+      allow delete: if signed() && (u == uid() || admin());
+    }
+
+    // ---------- processos de aprovação ----------
+    match /processos/{p} {
+      allow read: if podeVer(resource.data);
+      // encerrar / reabrir / corrigir obra
+      allow update: if admin()
+        || (ativo() && me().podeEncerrar == true && podeVer(resource.data) && soMuda(['status', 'encerramento', 'atualizadoEm']));
+      allow create, delete: if admin();
+
+      match /arquivo/{f} {
+        allow read: if podeVer(get(/databases/$(db)/documents/processos/$(p)).data);
+        allow write: if admin();
+      }
+    }
+
+    // ---------- "A responder" ----------
+    match /responder/{r} {
+      allow read: if ativo() && (resource.data.dono == uid() || admin());
+      allow update: if ativo() && (resource.data.dono == uid() || admin()) && soMuda(['status', 'motivo', 'resolvidoEm', 'atualizadoEm']);
+      allow create, delete: if admin();
+    }
+
+    // ---------- máquinas locadas ----------
+    match /equipamentos/{e} {
+      allow read: if ativo() && (veTudo() || resource.data.obra in me().ver.obras);
+      allow write: if admin();
+    }
+
+    // ---------- obras ----------
+    match /obras/{o} {
+      allow read: if ativo();
+      allow write: if admin();
+    }
+
+    // ---------- configuração ----------
+    match /config/{c} {
+      allow read: if ativo();
+      allow write: if admin() && c != 'robo' && c != 'inicializado';
+    }
+
+    // ---------- avisos (para cada usuário) ----------
+    match /avisos/{a} {
+      allow read: if ativo() && resource.data.para == uid();
+      allow update: if ativo() && resource.data.para == uid() && soMuda(['lido']);
+      allow delete: if ativo() && resource.data.para == uid();
+      allow create: if false;
+    }
+
+    // ---------- histórico de ações do administrador ----------
+    match /log/{l} {
+      allow read: if admin();
+      allow create: if admin() && request.resource.data.por == uid();
+      allow update, delete: if false;
+    }
+  }
+}
