@@ -41,8 +41,9 @@ const ETL = { ok: "Aprovou", devolvido: "Devolveu", pendente: "Aguardando", folg
 const RSL = { aguardando: "Aguardando você", respondido: "Respondido", resolvido: "Resolvido", arquivado: "Sem resposta necessária" };
 
 /* ------------------------------------------------------------------ estado */
-const S = { gen: 0, user: null, perfil: null, procs: new Map(), procParts: [], resps: new Map(), avisos: new Map(), eqs: new Map(), obras: [], cfg: {}, robo: {}, conta: null, usuarios: [], contas: new Map(), unsub: [], tab: "fila", sub: "usuarios", f: {} };
+const S = { gen: 0, user: null, perfil: null, procs: new Map(), procParts: [], resps: new Map(), avisos: new Map(), eqs: new Map(), docs: new Map(), obraSel: "", obras: [], cfg: {}, robo: {}, conta: null, usuarios: [], contas: new Map(), unsub: [], tab: "fila", sub: "usuarios", f: {} };
 const isAdmin = () => S.perfil?.papel === "admin";
+const podeDocs = () => isAdmin() || S.perfil?.rh === true;
 const obraNome = c => { const o = S.obras.find(o => o.codigo === c); return o ? `${o.codigo === o.nome ? o.nome : o.codigo + " · " + o.nome}` : (c === "SEM_OBRA" ? "Obra não identificada" : c || "—"); };
 function limparSubs() { S.unsub.forEach(u => { try { u(); } catch (e) { } }); S.unsub = []; }
 
@@ -148,18 +149,19 @@ function assinarUniao(qs, mapa, aoMudar) {
 function iniciarApp() {
   S.gen++;
   limparSubs();
-  S.procs.clear(); S.resps.clear(); S.avisos.clear(); S.eqs.clear();
+  S.procs.clear(); S.resps.clear(); S.avisos.clear(); S.eqs.clear(); S.docs.clear();
   S.unsub.push(onSnapshot(doc(db, "usuarios", S.user.uid), s => { const n = s.data(); if (!n || n.status !== "ativo") { S.perfil = n; telaEspera(); return; } const mudou = JSON.stringify([n.papel, n.ver, n.rh, n.podeEncerrar, n.podeConectar]) !== JSON.stringify([S.perfil.papel, S.perfil.ver, S.perfil.rh, S.perfil.podeEncerrar, S.perfil.podeConectar]); S.perfil = n; if (mudou) iniciarApp(); }));
   casca();
   const atualizar = () => atualizarDados();
   assinarUniao(consultasPermitidas("processos"), S.procs, atualizar);
   assinarUniao(consultasPermitidas("equipamentos", false), S.eqs, atualizar);
+  if (podeDocs()) assinarUniao(consultasPermitidas("documentos"), S.docs, atualizar);
   S.unsub.push(onSnapshot(query(collection(db, "responder"), where("dono", "==", S.user.uid)), s => { S.resps = new Map(s.docs.map(d => [d.id, { id: d.id, ...d.data() }])); atualizar(); }));
   S.unsub.push(onSnapshot(query(collection(db, "avisos"), where("para", "==", S.user.uid)), s => { S.avisos = new Map(s.docs.map(d => [d.id, { id: d.id, ...d.data() }])); badgeAvisos(); }));
-  S.unsub.push(onSnapshot(collection(db, "obras"), s => { S.obras = s.docs.map(d => ({ codigo: d.id, ...d.data() })).sort((a, b) => a.codigo.localeCompare(b.codigo, "pt", { numeric: true })); atualizar(); }));
+  S.unsub.push(onSnapshot(collection(db, "obras"), s => { S.obras = s.docs.map(d => ({ codigo: d.id, ...d.data() })).sort((a, b) => a.codigo.localeCompare(b.codigo, "pt", { numeric: true })); sideObras(); atualizar(); }));
   S.unsub.push(onSnapshot(doc(db, "config", "geral"), s => { S.cfg = s.data() || {}; }));
   S.unsub.push(onSnapshot(doc(db, "config", "robo"), s => { S.robo = s.data() || {}; carimbo(); }));
-  S.unsub.push(onSnapshot(doc(db, "contas", S.user.uid), s => { S.conta = s.exists() ? s.data() : null; if (S.tab === "conta") mostrar("conta"); }, () => { }));
+  S.unsub.push(onSnapshot(doc(db, "contas", S.user.uid), s => { S.conta = s.exists() ? s.data() : null; carimbo(); if (S.tab === "conta") mostrar("conta"); }, () => { }));
   if (isAdmin()) {
     S.unsub.push(onSnapshot(collection(db, "usuarios"), s => { S.usuarios = s.docs.map(d => ({ uid: d.id, ...d.data() })); badgeAjustes(); if (S.tab === "ajustes" && S.sub === "usuarios") preencherAjustes(); }));
     S.unsub.push(onSnapshot(collection(db, "contas"), s => { S.contas = new Map(s.docs.map(d => [d.id, d.data()])); if (S.tab === "ajustes" && S.sub === "robo") preencherAjustes(); }));
@@ -167,44 +169,112 @@ function iniciarApp() {
 }
 
 /* ------------------------------------------------------------------ casca */
-const ABAS = [["fila", "Na fila"], ["responder", "A responder"], ["processos", "Processos"], ["arquivo", "Arquivo"], ["maquinas", "Máquinas"], ["pagamentos", "Pagamentos"], ["ajustes", "Ajustes"], ["conta", "Minha conta"]];
+const ABAS = [["fila", "Na fila"], ["responder", "A responder"], ["processos", "Processos"], ["docs", "Contracheques"], ["arquivo", "Arquivo"], ["maquinas", "Máquinas"], ["pagamentos", "Pagamentos"], ["ajustes", "Ajustes"], ["conta", "Minha conta"]];
+const CURTO = { fila: "Fila", responder: "Responder", processos: "Processos", docs: "Contracheques", arquivo: "Arquivo" };
+const IC = {
+  fila: '<path d="M4 6h16M4 12h16M4 18h10"/>',
+  responder: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  processos: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/>',
+  docs: '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+  arquivo: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  maquinas: '<path d="M3 16V9h9l3 4h6v3M5 18a2 2 0 1 0 4 0 2 2 0 1 0-4 0m10 0a2 2 0 1 0 4 0 2 2 0 1 0-4 0"/>',
+  pagamentos: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/>',
+  ajustes: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  conta: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  mais: '<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>',
+  sino: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  busca: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  clipe: '<path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/>'
+};
+const ico = k => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true">${IC[k] || ""}</svg>`;
+const abasVisiveis = () => ABAS.filter(a => (a[0] !== "ajustes" || isAdmin()) && (a[0] !== "docs" || podeDocs()));
+const abasRodape = () => ["fila", "responder", "processos", podeDocs() ? "docs" : "arquivo"];
 function casca() {
-  const abas = ABAS.filter(a => a[0] !== "ajustes" || isAdmin());
-  $("app").innerHTML = `<header><div class="wrap">
-      <div class="head"><div><h1 class="t">Fluxo CMRP</h1><p class="sub" id="stamp"></p></div>
-        <div class="icons"><button class="iconbtn" id="b-avisos" aria-label="Avisos">🔔<span class="n" id="n-avisos" hidden></span></button></div></div>
-      <nav class="tabs" role="tablist">${abas.map(a => `<button class="tab" role="tab" data-tab="${a[0]}">${a[1]}<span class="n" id="n-${a[0]}"></span></button>`).join("")}</nav>
-    </div></header><div class="wrap"><main id="main"></main></div>`;
-  document.querySelectorAll(".tab").forEach(b => b.onclick = () => mostrar(b.dataset.tab));
-  $("b-avisos").onclick = abrirAvisos;
-  window.onhashchange = () => { const t = location.hash.slice(1); if (t && t !== S.tab && ABAS.some(a => a[0] === t)) mostrar(t); };
-  const ini = location.hash.slice(1);
-  mostrar(abas.some(a => a[0] === ini) ? ini : "fila");
-  carimbo(); badgeAvisos(); badgeAjustes();
+  const abas = abasVisiveis();
+  const ini = (S.perfil?.nome || "?").split(/\s+/).filter(Boolean).slice(0, 2).map(x => x[0]).join("").toUpperCase();
+  $("app").innerHTML = `<div class="shell">
+    <aside class="side"><div class="marca"><div class="logo">FC</div><div><b>Fluxo CMRP</b><span>${esc(S.perfil?.nome || "")}${isAdmin() ? " · admin" : ""}</span></div></div>
+      ${abas.map(a => `<button class="it" data-tab="${a[0]}">${ico(a[0])}${a[1]}<span class="n" data-n="${a[0]}"></span></button>`).join("")}
+      <div class="rot">Obras</div><div id="side-obras"></div><div class="rob" id="side-robo"></div></aside>
+    <div class="area"><header class="top"><div class="top-l"><h1 class="t" id="titulo"></h1><span class="pill" id="robo-pill"></span></div>
+      <div class="top-r"><button class="iconbtn" id="b-avisos" aria-label="Avisos">${ico("sino")}<span class="n" id="n-avisos" hidden></span></button><button class="av" id="b-eu" aria-label="Minha conta">${esc(ini || "?")}</button></div></header>
+      <div class="wrap"><main id="main"></main></div></div>
+    <nav class="bottom" aria-label="Abas">${abasRodape().map(t => `<button data-tab="${t}">${ico(t)}<span class="l">${CURTO[t]}</span><span class="n" data-n="${t}"></span></button>`).join("")}<button id="b-mais">${ico("mais")}<span class="l">Mais</span><span class="n red" data-n="mais"></span></button></nav></div>`;
+  document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => mostrar(b.dataset.tab));
+  $("b-mais").onclick = abrirMais; $("b-eu").onclick = () => mostrar("conta"); $("b-avisos").onclick = abrirAvisos;
+  window.onhashchange = () => { const t = location.hash.slice(1); if (t && t !== S.tab && abasVisiveis().some(a => a[0] === t)) mostrar(t); };
+  const h = location.hash.slice(1);
+  mostrar(abas.some(a => a[0] === h) ? h : "fila");
+  carimbo(); badgeAvisos(); badgeAjustes(); sideObras();
+  if (!S.relogio) S.relogio = setInterval(carimbo, 60000);
+}
+function abrirMais() {
+  const fora = abasVisiveis().filter(a => !abasRodape().includes(a[0]));
+  abrir(`<h3>Mais</h3><div class="mais">${fora.map(a => { const n = document.querySelector(`.side [data-n="${a[0]}"]`); return `<button data-ir="${a[0]}">${ico(a[0])}${a[1]}${n && n.textContent ? `<span class="n ${n.classList.contains("red") ? "red" : ""}">${esc(n.textContent)}</span>` : ""}</button>`; }).join("")}</div>`, B => B.querySelectorAll("[data-ir]").forEach(b => b.onclick = () => { fechar(); mostrar(b.dataset.ir); }));
+}
+function estadoRobo() {
+  const r = S.robo?.ultimaRodada, d = parse(r), rs = S.robo?.resumo || {};
+  const extra = `${rs.emails ?? 0} e-mails · ${rs.erros ?? 0} erros na última rodada`;
+  if (S.conta?.estado === "erro") return { cls: "red", txt: "Erro ao ler seu e-mail", titulo: "Erro na sua conta", det: S.conta.erro || "Veja em Minha conta." };
+  if (!d || isNaN(d)) return { cls: "amber", txt: "Robô ainda não rodou", titulo: "Robô aguardando", det: "A primeira leitura sai em até 10 min." };
+  const min = Math.max(0, Math.round((Date.now() - d) / 6e4)), quando = min < 1 ? "agora" : min < 60 ? `há ${min} min` : `às ${fmtS(r)}`;
+  const prox = new Date(Math.max(Date.now(), d.getTime() + 10 * 6e4));
+  if (min <= 25) return { cls: "ok", txt: `Robô ok · leu ${quando}`, titulo: "Robô funcionando", det: `Última leitura ${hm(d)} · próxima ~${hm(prox)}<br>${extra}` };
+  if (min <= 120) return { cls: "amber", txt: `Robô atrasado · leu ${quando}`, titulo: "Robô atrasado", det: `Última leitura ${fmtS(r)}. O GitHub às vezes atrasa as rodadas.<br>${extra}` };
+  return { cls: "red", txt: `Robô parado desde ${fmtS(r)}`, titulo: "Robô parado", det: `Sem leitura desde ${fmtS(r)}. Veja a aba Actions no GitHub.` };
 }
 function carimbo() {
-  const el = $("stamp"); if (!el) return;
-  const r = S.robo?.ultimaRodada;
-  el.innerHTML = `${esc(S.perfil?.nome || "")}${r ? ` · robô leu às <b>${esc(fmtS(r))}</b>` : " · robô ainda não rodou"}`;
+  const e = estadoRobo(), p = $("robo-pill");
+  if (p) { p.className = "pill " + e.cls; p.innerHTML = `<i class="dot"></i>${esc(e.txt)}`; }
+  const sr = $("side-robo"); if (sr) sr.innerHTML = `<b><i class="sdot" style="background:${{ ok: "#4fbf9c", amber: "#f0b35a", red: "#ff8a80" }[e.cls]}"></i>${esc(e.titulo)}</b>${e.det}`;
+}
+const ABERTOS = ["pendente", "devolvido", "conferir"];
+function sideObras() {
+  const el = $("side-obras"); if (!el) return;
+  const cont = {}; S.procs.forEach(p => { if (ABERTOS.includes(p.status)) cont[p.obra] = (cont[p.obra] || 0) + 1; });
+  el.innerHTML = S.obras.filter(o => o.ativa !== false).map(o => `<button class="ob" data-ob="${esc(o.codigo)}" aria-pressed="${S.obraSel === o.codigo}"><i class="sdot ${scor(o.codigo)}"></i>${esc(obraNome(o.codigo))}<span class="k">${cont[o.codigo] || 0}</span></button>`).join("");
+  el.querySelectorAll("[data-ob]").forEach(b => b.onclick = () => selObra(b.dataset.ob));
+}
+function selObra(c) {
+  S.obraSel = S.obraSel === c ? "" : c;
+  ["fo", "ao", "mo", "po", "dobra"].forEach(k => S.f[k] = S.obraSel);
+  sideObras(); mostrar(S.tab);
 }
 function mostrar(tab) {
+  if (!abasVisiveis().some(a => a[0] === tab)) tab = "fila";
   S.tab = tab;
-  document.querySelectorAll(".tab").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === tab));
+  document.querySelectorAll("[data-tab]").forEach(b => b.dataset.tab === tab ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current"));
+  const bm = $("b-mais"); if (bm) abasRodape().includes(tab) ? bm.removeAttribute("aria-current") : bm.setAttribute("aria-current", "page");
+  $("titulo") && ($("titulo").textContent = (ABAS.find(a => a[0] === tab) || ABAS[0])[1]);
   if (location.hash.slice(1) !== tab) history.replaceState(null, "", "#" + tab);
-  const V = { fila: vFila, responder: vResponder, processos: vProcessos, arquivo: vArquivo, maquinas: vMaquinas, pagamentos: vPagamentos, ajustes: vAjustes, conta: vConta };
+  const V = { fila: vFila, responder: vResponder, processos: vProcessos, docs: vDocs, arquivo: vArquivo, maquinas: vMaquinas, pagamentos: vPagamentos, ajustes: vAjustes, conta: vConta };
   $("main").innerHTML = ""; (V[tab] || vFila)(); window.scrollTo(0, 0);
 }
+function setN(tab, n, red) { document.querySelectorAll(`[data-n="${tab}"]`).forEach(el => { el.textContent = n || ""; el.classList.toggle("red", !!red); }); }
 function atualizarDados() {
-  const fila = [...S.procs.values()].filter(p => ["pendente", "devolvido", "conferir"].includes(p.status));
+  const fila = [...S.procs.values()].filter(p => ABERTOS.includes(p.status));
   const minhas = fila.filter(p => ["devolvido", "conferir"].includes(p.status) && (p.dono === S.user.uid || isAdmin()));
-  const n = $("n-fila"); if (n) { n.textContent = fila.length || ""; n.classList.toggle("red", minhas.length > 0); }
-  const r = [...S.resps.values()].filter(x => x.status === "aguardando").length; $("n-responder") && ($("n-responder").textContent = r || "");
-  const fz = [...S.eqs.values()].filter(e => e.status === "faltando").length; const ne = $("n-maquinas"); if (ne) { ne.textContent = fz || ""; ne.classList.add("red"); }
-  if (["fila", "responder", "processos", "arquivo", "maquinas", "pagamentos"].includes(S.tab)) preencher();
+  setN("fila", fila.length, minhas.length > 0);
+  setN("responder", [...S.resps.values()].filter(x => x.status === "aguardando").length, false);
+  setN("maquinas", [...S.eqs.values()].filter(e => e.status === "faltando").length, true);
+  const ini = new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10);
+  setN("docs", [...S.docs.values()].filter(d => (d.data || "") >= ini).length, false);
+  badgeMais(); sideObras();
+  if (["fila", "responder", "processos", "docs", "arquivo", "maquinas", "pagamentos"].includes(S.tab)) preencher();
+}
+function badgeMais() {
+  const fora = abasVisiveis().map(a => a[0]).filter(t => !abasRodape().includes(t));
+  const n = fora.reduce((s, t) => { const el = document.querySelector(`.side [data-n="${t}"]`); return s + (el && el.classList.contains("red") ? Number(el.textContent) || 0 : 0); }, 0);
+  setN("mais", n, true);
 }
 function badgeAvisos() { const n = [...S.avisos.values()].filter(a => !a.lido).length; const el = $("n-avisos"); if (el) { el.textContent = n; el.hidden = !n; } }
-function badgeAjustes() { const n = S.usuarios.filter(u => u.status === "pendente").length; const el = $("n-ajustes"); if (el) { el.textContent = n || ""; el.classList.add("red"); } }
-function preencher() { ({ fila: pFila, responder: pResponder, processos: pProcessos, arquivo: pArquivo, maquinas: pMaquinas, pagamentos: pPagamentos }[S.tab] || (() => { }))(); }
+function badgeAjustes() { setN("ajustes", S.usuarios.filter(u => u.status === "pendente").length, true); badgeMais(); }
+function preencher() { ({ fila: pFila, responder: pResponder, processos: pProcessos, docs: pDocs, arquivo: pArquivo, maquinas: pMaquinas, pagamentos: pPagamentos }[S.tab] || (() => { }))(); }
+const cIdx = c => Math.max(0, S.obras.findIndex(o => o.codigo === c)) % 6;
+const scor = c => "sc" + cIdx(c);
+const obraTag = c => c && c !== "SEM_OBRA" ? `<span class="obra oc${cIdx(c)}" title="${esc(obraNome(c))}">${esc(c)}</span>` : `<span class="obra" title="Obra não identificada">?</span>`;
+const daObra = x => !S.obraSel || x.obra === S.obraSel;
+const curto = (a, obra) => { const o = S.obras.find(x => x.codigo === obra); if (!o) return a || ""; const r = new RegExp("^\\s*" + obra.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*[-–—]\\s*[^-–—]{2,40}?\\s*[-–—]\\s*"); return (a || "").replace(r, "") || a; };
 
 /* ------------------------------------------------------------------ cartões de processo */
 function since(p) { let l = p.reenviadoEm || p.envio || ""; (p.etapas || []).forEach(e => { if (e.status === "ok" && e.em && e.em > l) l = e.em; }); return l; }
@@ -216,62 +286,113 @@ function flow(p) {
   return `<div class="flow">${etapas(p).map(e => { let st = e.status || "vazio"; if (st === "pendente") { if (seen) st = "vazio"; seen = true; } const done = st === "ok"; const when = done && e.em ? fmtS(e.em) : st === "pendente" ? "aguardando" : st === "devolvido" ? "devolveu " + (e.em ? fmtS(e.em) : "") : ETL[st] || "—"; return `<div class="step ${done ? "done" : ""}"><i class="lamp ${st}"></i><span class="who">${esc(e.quem)}</span><span class="when">${esc(when)}</span></div>`; }).join("")}</div>`;
 }
 const metaLinha = p => [obraNome(p.obra), p.tipo, p.por ? "por " + p.por : ""].filter(Boolean).map(esc).join(" · ");
+const metaCurta = p => [p.tipo, p.por ? "por " + p.por : ""].filter(Boolean).map(esc).join(" · ");
 const ultimaDevolucao = p => { const h = (p.historico || []).filter(x => x.tipo === "devolucao").pop(); return h ? `${h.quem}: “${h.texto}”` : ""; };
+const etapaAtual = p => ((p.etapas || []).find(e => e.status === "pendente") || {}).quem;
+function passos(p) {
+  let visto = false; const et = etapas(p);
+  return `<div class="passos">${et.map((e, i) => {
+    let c = e.status === "ok" ? "ok" : e.status === "devolvido" ? "back" : "";
+    if (e.status === "pendente" && !visto) { visto = true; if (p.status === "pendente") c = "now"; }
+    const t = `${e.quem}: ${ETL[e.status] || "—"}${e.em ? " " + fmt(e.em) : ""}`;
+    return (i ? `<i class="pl ${et[i - 1].status === "ok" ? "ok" : ""}"></i>` : "") + `<span class="ps ${c}" title="${esc(t)}">${esc((e.quem || "?")[0].toUpperCase())}</span>`;
+  }).join("")}</div>`;
+}
 function cartaoFila(p) {
+  const i = idle(p), dev = p.status === "devolvido" || p.status === "conferir", com = dev ? (p.status === "conferir" ? "conferir" : "com você") : etapaAtual(p) ? "com " + etapaAtual(p) : "parado";
+  return `<div class="card2 ${dev ? "dev" : "sev-" + i.sev}" role="button" tabindex="0" data-p="${esc(p.id)}">
+    <div class="c-top"><div style="min-width:0"><h3>${esc(curto(p.assunto, p.obra))}</h3><div class="meta">${obraTag(p.obra)}${metaCurta(p)}</div></div>
+      <div class="dias c-${dev ? "amber" : i.sev}">${esc(i.txt)}<small>${esc(com)}</small></div></div>
+    ${dev && ultimaDevolucao(p) ? `<div class="quote2">${esc(ultimaDevolucao(p))}</div>` : ""}
+    <div class="c-foot">${passos(p)}${p.valor ? `<span class="valor">${esc(p.valor)}</span>` : ""}${!dev && etapaAtual(p) ? `<button class="btn sm" data-cobrar="${esc(p.id)}">Cobrar</button>` : ""}</div></div>`;
+}
+function cartaoK(p) {
   const i = idle(p), dev = p.status === "devolvido" || p.status === "conferir";
-  return `<button class="item ${dev ? p.status : "sev-" + i.sev}" data-p="${esc(p.id)}">
-    <div style="min-width:0"><h3>${esc(p.assunto)}</h3><div class="meta">${metaLinha(p)}</div></div>
-    <div class="right"><span class="age c-${dev ? "amber" : i.sev}">${esc(i.txt)}<small>${dev ? "com você" : "parado"}</small></span></div>
-    ${dev && ultimaDevolucao(p) ? `<div class="full say">${esc(ultimaDevolucao(p))}</div>` : ""}
-    <div class="full"><span class="chip st-${esc(p.status)}">${esc(comQuem(p))}</span>${p.valor ? ` <span class="chip" style="font-family:var(--mono)">${esc(p.valor)}</span>` : ""}</div>
-    <div class="full">${flow(p)}</div></button>`;
+  return `<button class="kc ${dev ? "dev" : ""}" data-p="${esc(p.id)}"><h5>${esc(curto(p.assunto, p.obra))}</h5><div class="meta">${obraTag(p.obra)} ${esc(p.tipo || "")}${dev ? " · " + esc(p.status === "conferir" ? "conferir" : "devolvido") : ""}</div>
+    <div class="linha"><span class="valor">${esc(p.valor || "—")}</span><span class="dd ${dev ? "amber" : i.sev}">${esc(i.txt || "agora")}</span></div></button>`;
 }
 function cartaoProc(p) {
-  return `<button class="item ${esc(p.status)}" data-p="${esc(p.id)}">
-    <div style="min-width:0"><h3>${esc(p.assunto)}</h3><div class="meta">${metaLinha(p)}${p.obs?.length ? ` · ● ${p.obs.length} nota${p.obs.length > 1 ? "s" : ""}` : ""}</div></div>
-    <div class="right"><span class="chip st-${esc(p.status)}">${esc(STL[p.status] || p.status)}</span>${p.valor ? `<span class="val">${esc(p.valor)}</span>` : ""}<span class="meta" style="font-family:var(--mono);font-size:11.5px">${p.aprovadoEm ? esc(fmtS(p.aprovadoEm)) : "desde " + esc(fmtS(since(p)))}</span></div>
-    <div class="full">${flow(p)}</div></button>`;
+  return `<div class="card2" role="button" tabindex="0" data-p="${esc(p.id)}" style="border-left-color:var(--${{ aprovado: "ok", devolvido: "warn", conferir: "bad", pendente: "accent" }[p.status] || "line"})">
+    <div class="c-top"><div style="min-width:0"><h3>${esc(p.assunto)}</h3><div class="meta">${obraTag(p.obra)}${metaCurta(p)}${p.obs?.length ? ` · ● ${p.obs.length} nota${p.obs.length > 1 ? "s" : ""}` : ""}</div></div>
+      <span class="chip st-${esc(p.status)}">${esc(STL[p.status] || p.status)}</span></div>
+    <div class="c-foot">${passos(p)}${p.valor ? `<span class="valor">${esc(p.valor)}</span>` : ""}<span class="meta" style="font-family:var(--mono);font-size:11.5px">${p.aprovadoEm ? "aprov. " + esc(fmtS(p.aprovadoEm)) : "desde " + esc(fmtS(since(p)))}</span></div></div>`;
 }
-function ligarCartoes(root) { root.querySelectorAll("[data-p]").forEach(b => b.onclick = () => abrirProc(b.dataset.p)); root.querySelectorAll("[data-r]").forEach(b => b.onclick = () => abrirResp(b.dataset.r)); }
+function textoCobranca(p) {
+  const quem = etapaAtual(p) || "", h = new Date().getHours(), oi = h < 12 ? "Bom dia" : h < 18 ? "Boa tarde" : "Boa noite";
+  const desde = parse(since(p));
+  return `${oi}${quem ? ", " + quem : ""}! Poderia verificar, por favor, o pedido “${p.assunto}”${p.valor ? ` (${p.valor})` : ""}? Está aguardando aprovação${desde ? " desde " + dm(desde) : ""}. Obrigado!`;
+}
+async function cobrar(id) {
+  const p = S.procs.get(id); if (!p) return;
+  const t = textoCobranca(p);
+  try { await navigator.clipboard.writeText(t); toast("Mensagem de cobrança copiada. Cole no e-mail ou WhatsApp."); }
+  catch (e) { abrir(`<h3>Mensagem de cobrança</h3><textarea rows="5" readonly>${esc(t)}</textarea><div class="row"><button class="btn primary" id="cb-x">Fechar</button></div>`, B => { B.querySelector("textarea").select(); B.querySelector("#cb-x").onclick = fechar; }); }
+}
+function ligarCartoes(root) {
+  const ativar = (el, fn) => { el.onclick = e => { if (e.target.closest("[data-cobrar],[data-arq]")) return; fn(); }; el.onkeydown = e => { if (e.key === "Enter" && e.target === el) fn(); }; };
+  root.querySelectorAll("[data-p]").forEach(b => ativar(b, () => abrirProc(b.dataset.p)));
+  root.querySelectorAll("[data-r]").forEach(b => ativar(b, () => abrirResp(b.dataset.r)));
+  root.querySelectorAll("[data-cobrar]").forEach(b => b.onclick = () => cobrar(b.dataset.cobrar));
+  root.querySelectorAll("[data-arq]").forEach(b => b.onclick = async () => { try { await updateDoc(doc(db, "responder", b.dataset.arq), { status: "arquivado", resolvidoEm: agoraIso(), motivo: "Não precisa responder", atualizadoEm: agoraIso() }); toast("Marcado como sem resposta"); } catch (e) { toast(erroMsg(e)); } });
+}
 
 /* ------------------------------------------------------------------ NA FILA */
+const ehPC = () => matchMedia("(min-width:900px)").matches;
 function vFila() {
-  $("main").innerHTML = `<div class="stats" id="stats"></div>
-    <section class="list" id="sec-voce"><div class="sechead"><h2>Precisa de você</h2><span class="hint">devolvidos e para conferir</span></div><div class="grid2" id="voce"></div></section>
-    <section class="list"><div class="sechead"><h2>Parados com aprovadores</h2><span class="hint">vermelho ≥ 5 dias · âmbar ≥ 1 dia</span></div><div class="grid2" id="parados"></div></section>
-    <section class="list" id="sec-resp"></section>`;
+  $("main").innerHTML = `<div class="barra"><label class="busca">${ico("busca")}<input id="fq" type="search" placeholder="Buscar fornecedor, OC, BM…" value="${esc(S.f.fq || "")}" aria-label="Buscar"></label>
+      <div class="seg so-pc" id="modo"><button data-m="lista">Lista</button><button data-m="quadro">Quadro</button></div></div>
+    <div class="chips so-cel" id="obchips"></div>
+    <div class="kpis" id="stats"></div><div class="list" id="fbody"></div>`;
+  $("fq").oninput = () => { S.f.fq = $("fq").value; pFila(); };
+  $("modo").querySelectorAll("button").forEach(b => b.onclick = () => { S.f.modo = b.dataset.m; pFila(); });
   pFila();
 }
 function pFila() {
-  const P = [...S.procs.values()], hoje = new Date().toDateString(), mes = agoraIso().slice(0, 7);
+  if (!$("fbody")) return;
+  const q = (S.f.fq || "").toLowerCase(), quadro = ehPC() && (S.f.modo || "quadro") === "quadro";
+  $("modo").querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", (b.dataset.m === "quadro") === quadro));
+  $("obchips").innerHTML = [["", "Todas"], ...S.obras.filter(o => o.ativa !== false).map(o => [o.codigo, obraNome(o.codigo)])].map(([c, n]) => `<button data-ob="${esc(c)}" aria-pressed="${S.obraSel === c}">${esc(n)}</button>`).join("");
+  $("obchips").querySelectorAll("button").forEach(b => b.onclick = () => selObra(b.dataset.ob === "" ? S.obraSel : b.dataset.ob));
+  const P = [...S.procs.values()].filter(p => daObra(p) && (!q || [p.assunto, p.tipo, p.por, p.valor, obraNome(p.obra)].join(" ").toLowerCase().includes(q)));
+  const mes = agoraIso().slice(0, 7);
   const voce = P.filter(p => ["devolvido", "conferir"].includes(p.status)).sort((a, b) => (a.atualizadoEm || "").localeCompare(b.atualizadoEm || ""));
   const parados = P.filter(p => p.status === "pendente").sort((a, b) => idle(b).h - idle(a).h);
-  const aprovHoje = P.filter(p => p.status === "aprovado" && p.aprovadoEm && parse(p.aprovadoEm).toDateString() === hoje).length;
-  const aprovMes = P.filter(p => p.status === "aprovado" && (p.aprovadoEm || "").startsWith(mes)).length;
-  const velhos = parados.filter(p => idle(p).sev === "red").length;
-  const st = [["pendente", "Pendentes", parados.length, velhos ? velhos + " há 5 dias ou mais" : "aguardando aprovação", "var(--accent)"],
-    ["devolvido", "Devolvidos", voce.length, "precisam de você", "var(--warn)"],
-    ["aprovado", "Aprovados hoje", aprovHoje, "até agora", "var(--ok)"],
-    ["aprovado", "No mês", aprovMes, new Date().toLocaleDateString("pt-BR", { month: "long" }), "var(--ok)"]];
-  $("stats").innerHTML = st.map(s => `<button class="stat" data-f="${s[0]}"><span class="k"><i class="dot" style="background:${s[4]}"></i>${s[1]}</span><span class="v">${s[2]}</span><span class="s">${esc(s[3])}</span></button>`).join("");
-  $("stats").querySelectorAll(".stat").forEach(b => b.onclick = () => { S.f.status = b.dataset.f; mostrar("processos"); });
-  $("sec-voce").hidden = !voce.length;
-  $("voce").innerHTML = voce.map(cartaoFila).join("");
-  $("parados").innerHTML = parados.length ? parados.map(cartaoFila).join("") : `<div class="empty" style="grid-column:1/-1">${S.procs.size ? "Nada parado. Tudo o que foi enviado já tem aprovação." : "Nenhum processo ainda. Conecte seu e-mail em Minha conta."}</div>`;
-  const resp = [...S.resps.values()].filter(r => r.status === "aguardando").sort((a, b) => (a.recebidoEm || "").localeCompare(b.recebidoEm || ""));
-  $("sec-resp").innerHTML = resp.length ? `<div class="sechead"><h2>Aguardando sua resposta</h2><button class="link" id="ver-resp">ver todos (${resp.length})</button></div><div class="grid2">${resp.slice(0, 4).map(cartaoResp).join("")}</div>` : "";
+  const aprovMes = P.filter(p => p.status === "aprovado" && (p.aprovadoEm || "").startsWith(mes));
+  const velhos = parados.filter(p => idle(p).sev === "red");
+  const soma = L => L.reduce((s, p) => s + money(p.valor), 0);
+  const tempos = aprovMes.map(p => (parse(p.aprovadoEm) - parse(p.envio)) / 864e5).filter(x => x >= 0 && isFinite(x));
+  const media = tempos.length ? (tempos.reduce((a, b) => a + b, 0) / tempos.length).toLocaleString("pt-BR", { maximumFractionDigits: 1 }) + " d" : "—";
+  const st = [["devolvido", "Com você", voce.length, "devolvidos p/ ajuste", "var(--warn)", ""], ["pendente", "Em aprovação", parados.length, soma(parados) ? brl(soma(parados)) : "aguardando", "var(--accent)", "kpc"],
+    ["pendente", "Parados +5d", velhos.length, "cobrar hoje", "var(--bad)", ""], ["aprovado", "Aprovados/mês", aprovMes.length, soma(aprovMes) ? brl(soma(aprovMes)) : new Date().toLocaleDateString("pt-BR", { month: "long" }), "var(--ok)", ""],
+    ["aprovado", "Tempo médio", media, "do pedido à aprovação", "var(--idle)", "kpc"]];
+  $("stats").innerHTML = st.map(s => `<button class="kpi ${s[5]}" data-f="${s[0]}"><span class="v" style="color:${s[4] === "var(--idle)" ? "var(--fg)" : s[4]}">${esc(s[2])}</span><span class="k"><i class="dot so-pc" style="background:${s[4]}"></i>${esc(s[1])}</span><span class="s">${esc(s[3])}</span></button>`).join("");
+  $("stats").querySelectorAll(".kpi").forEach(b => b.onclick = () => { S.f.status = b.dataset.f; mostrar("processos"); });
+  const resp = [...S.resps.values()].filter(r => r.status === "aguardando" && daObra(r) && (!q || [r.assunto, r.trecho, r.deNome].join(" ").toLowerCase().includes(q))).sort((a, b) => (a.recebidoEm || "").localeCompare(b.recebidoEm || ""));
+  if (quadro) {
+    const nomes = [...(S.cfg.etapasIniciais || []), ...(S.cfg.aprovadores || [])].map(a => a.nome);
+    parados.forEach(p => { const n = etapaAtual(p); if (n && !nomes.includes(n)) nomes.push(n); });
+    const ini = (S.cfg.etapasIniciais || []).map(a => a.nome);
+    const cols = [["Com você", "var(--warn)", voce, "Nada devolvido para você."]].concat(nomes.map(n => [n === "UICF" ? "Com UICF" : "Com " + n, "var(--accent)", parados.filter(p => etapaAtual(p) === n), "Nada com " + n + "."]).filter((c, i) => c[2].length || !ini.includes(nomes[i])));
+    $("fbody").innerHTML = `<div class="quadro">${cols.map(c => `<div class="col"><h4><i class="dot" style="background:${c[1]}"></i>${esc(c[0])}<span class="n">${c[2].length}</span></h4>${c[2].length ? c[2].map(cartaoK).join("") : `<div class="vazio">${esc(c[3])}</div>`}</div>`).join("")}</div>
+      ${resp.length ? `<section class="list"><div class="sechead"><h2>Aguardando sua resposta</h2><button class="link" id="ver-resp">ver todos (${resp.length})</button></div><div class="grid2">${resp.slice(0, 4).map(cartaoResp).join("")}</div></section>` : ""}`;
+  } else {
+    $("fbody").innerHTML = `${voce.length ? `<section class="list"><div class="sechead"><h2>Precisa de você</h2><span class="hint">devolvidos e para conferir</span></div><div class="grid2">${voce.map(cartaoFila).join("")}</div></section>` : ""}
+      <section class="list"><div class="sechead"><h2>Parados com aprovadores</h2><span class="hint">vermelho ≥ 5 dias · âmbar ≥ 1 dia</span></div><div class="grid2">${parados.length ? parados.map(cartaoFila).join("") : `<div class="empty" style="grid-column:1/-1">${S.procs.size ? "Nada parado. Tudo o que foi enviado já tem aprovação." : "Nenhum processo ainda. Conecte seu e-mail em Minha conta."}</div>`}</div></section>
+      ${resp.length ? `<section class="list"><div class="sechead"><h2>Aguardando sua resposta</h2><button class="link" id="ver-resp">ver todos (${resp.length})</button></div><div class="grid2">${resp.slice(0, 4).map(cartaoResp).join("")}</div></section>` : ""}`;
+  }
   $("ver-resp") && ($("ver-resp").onclick = () => mostrar("responder"));
-  ligarCartoes($("main"));
+  ligarCartoes($("fbody"));
 }
 
 /* ------------------------------------------------------------------ A RESPONDER */
 function idadeResp(r) { const d = parse(r.recebidoEm); const h = d ? (Date.now() - d) / 36e5 : 0; return { txt: h < 1 ? "agora" : h < 24 ? Math.round(h) + " h" : Math.floor(h / 24) + " d", sev: h >= 72 ? "red" : h >= 24 ? "amber" : "fresh" }; }
 function cartaoResp(r) {
   const i = idadeResp(r), ag = r.status === "aguardando";
-  return `<button class="item ${ag ? "sev-" + i.sev : ""}" data-r="${esc(r.id)}">
-    <div style="min-width:0"><h3>${esc(r.assunto)}</h3><div class="meta">${esc(r.deNome || r.de)}${r.obra ? " · " + esc(obraNome(r.obra)) : ""} · ${esc(fmt(r.recebidoEm))}</div></div>
-    <div class="right">${ag ? `<span class="age c-${i.sev}">${esc(i.txt)}<small>esperando</small></span>` : `<span class="chip st-${esc(r.status)}">${esc(RSL[r.status])}</span>`}</div>
-    ${r.trecho ? `<div class="full meta">“${esc(r.trecho)}”</div>` : ""}</button>`;
+  return `<div class="card2 ${ag ? "sev-" + i.sev : ""}" role="button" tabindex="0" data-r="${esc(r.id)}">
+    <div class="c-top"><div style="min-width:0"><h3>${esc(curto(r.assunto, r.obra))}</h3><div class="meta">${r.obra ? obraTag(r.obra) : ""}${esc(r.deNome || r.de)} · ${esc(fmt(r.recebidoEm))}</div></div>
+      ${ag ? `<div class="dias c-${i.sev}">${esc(i.txt)}<small>esperando</small></div>` : `<span class="chip st-${esc(r.status)}">${esc(RSL[r.status])}</span>`}</div>
+    ${r.trecho ? `<div class="quote2 neutra">“${esc(r.trecho)}”</div>` : ""}
+    ${ag ? `<div class="c-foot" style="justify-content:flex-end"><button class="btn sm" data-arq="${esc(r.id)}">Não precisa responder</button></div>` : ""}</div>`;
 }
 function vResponder() {
   const rem = [...new Set([...S.resps.values()].map(r => r.deNome || r.de))].sort();
@@ -349,15 +470,15 @@ function abrirProc(id, modo) {
   const kv = [["Situação", `<span class="chip st-${esc(p.status)}">${esc(STL[p.status] || p.status)}</span>`], ["Obra", esc(obraNome(p.obra))], ["Tipo", esc(p.tipo)], ["Valor", p.valor ? `<span style="font-family:var(--mono)">${esc(p.valor)}</span>` : ""], ["Solicitante", esc(p.por)], ["Enviado", esc(fmt(p.envio))], ["Aprovado em", p.aprovadoEm ? esc(fmt(p.aprovadoEm)) : ""], ["Parado", ["pendente", "devolvido", "conferir"].includes(p.status) ? esc(idle(p).txt + " · " + comQuem(p)) : ""]].filter(x => x[1]).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
   let acoes;
   if (modo === "encerrar") acoes = `<form id="fe" style="display:grid;gap:8px"><label class="f">Motivo do encerramento <span class="opt">(fica gravado)</span><textarea id="e-mot" required placeholder="Ex.: aprovado por WhatsApp pelo Dr. Ubirajara"></textarea></label><div class="row"><button class="btn primary">Encerrar processo</button><button class="btn" type="button" id="e-x">Cancelar</button></div></form>`;
-  else acoes = `<div class="row">${p.pdf ? `<button class="btn" id="b-pdf">Abrir comprovante PDF</button>` : ""}${podeEncerrar(p) ? (p.status === "encerrado" ? `<button class="btn" id="b-reab">Reabrir</button>` : p.status !== "aprovado" ? `<button class="btn danger" id="b-enc">Encerrar manualmente</button>` : "") : ""}<button class="btn primary" id="b-x">Fechar</button></div>
+  else acoes = `<div class="row">${p.status === "pendente" && etapaAtual(p) ? `<button class="btn primary" id="b-cob">Copiar cobrança para ${esc(etapaAtual(p))}</button>` : ""}${p.pdf ? `<button class="btn" id="b-pdf">Abrir comprovante PDF</button>` : ""}${podeEncerrar(p) ? (p.status === "encerrado" ? `<button class="btn" id="b-reab">Reabrir</button>` : p.status !== "aprovado" ? `<button class="btn danger" id="b-enc">Encerrar manualmente</button>` : "") : ""}<button class="btn" id="b-x">Fechar</button></div>
     ${isAdmin() ? `<details><summary class="hint" style="cursor:pointer">Administrador</summary><div class="row" style="margin-top:8px"><select id="b-obra" style="max-width:260px">${opcoesObras(p.obra, "Escolha a obra")}</select><button class="btn sm" id="b-obra-s">Salvar obra</button><button class="btn sm danger" id="b-del">Excluir processo</button></div></details>` : ""}`;
-  abrir(`<h3>${esc(p.assunto)}</h3><dl class="kv">${kv}</dl><ol class="tl">${tl.join("")}</ol>
+  abrir(`<div class="row">${obraTag(p.obra)}<span class="chip st-${esc(p.status)}">${esc(["pendente", "devolvido", "conferir"].includes(p.status) ? comQuem(p) + " · " + idle(p).txt : STL[p.status] || p.status)}</span>${p.valor ? `<span class="valor">${esc(p.valor)}</span>` : ""}</div><h3>${esc(p.assunto)}</h3><dl class="kv">${kv}</dl><ol class="tl">${tl.join("")}</ol>
     ${p.status === "aprovado" && p.aprovacao ? `<blockquote class="quote">“${esc(p.aprovacao)}”<br><span class="hint">— ${esc(p.aprovadoPor === "UICF" || !p.aprovadoPor ? "Ubirajara Filho (UICF)" : p.aprovadoPor)}</span></blockquote>` : ""}
     ${p.encerramento ? `<p class="hint">Encerrado em ${esc(fmt(p.encerramento.em))}: ${esc(p.encerramento.motivo)}</p>` : ""}
     ${p.obs?.length ? `<ul class="obs">${p.obs.map(o => `<li>${esc(o)}</li>`).join("")}</ul>` : ""}${acoes}`, B => {
     const on = (sel, fn) => { const el = B.querySelector(sel); el && (el.onclick = fn); };
     on("#b-x", fechar); on("#e-x", () => abrirProc(id));
-    on("#b-pdf", () => abrirPdf(id));
+    on("#b-pdf", () => abrirPdf(id)); on("#b-cob", () => cobrar(id));
     on("#b-enc", () => { abrirProc(id, "encerrar"); setTimeout(() => B.querySelector("#e-mot")?.focus(), 0); });
     on("#b-reab", async () => { try { await updateDoc(doc(db, "processos", id), { status: p.encerramento?.antes || "pendente", encerramento: null, atualizadoEm: agoraIso() }); toast("Processo reaberto"); fechar(); } catch (e) { toast(erroMsg(e)); } });
     on("#b-obra-s", async () => { const v = B.querySelector("#b-obra").value; if (!v) return; try { await updateDoc(doc(db, "processos", id), { obra: v, obs: (p.obs || []).filter(o => !o.startsWith("Obra não identificada")) }); registrar("Obra corrigida", id, v); toast("Obra salva"); fechar(); } catch (e) { toast(erroMsg(e)); } });
@@ -374,6 +495,57 @@ async function abrirPdf(id) {
     const url = URL.createObjectURL(new Blob([arr], { type: "application/pdf" }));
     if (w) w.location = url; else { const a = document.createElement("a"); a.href = url; a.download = d.nome || "comprovante.pdf"; a.click(); }
   } catch (e) { w && w.close(); toast(erroMsg(e)); }
+}
+
+/* ------------------------------------------------------------------ CONTRACHEQUES (documentos do DP / RH) */
+const TIPOS_DP = [["Contracheque", "Contracheques", "CC"], ["Ponto", "Folhas de ponto", "PT"], ["Rescisão", "Rescisões", "RS"]];
+const mesLabel = k => { if (!k) return "Sem data"; const d = new Date(k + "-15T12:00:00"); if (isNaN(d)) return k; const t = d.toLocaleDateString("pt-BR", { month: "long", year: "numeric" }); return t[0].toUpperCase() + t.slice(1); };
+const mesDoc = d => d.competencia || (d.data || "").slice(0, 7);
+function vDocs() {
+  if (!podeDocs()) return mostrar("fila");
+  $("main").innerHTML = `<div class="barra"><label class="busca">${ico("busca")}<input id="dq" type="search" placeholder="Buscar funcionário, obra, mês, anexo…" value="${esc(S.f.dq || "")}" aria-label="Buscar"></label>
+      <select id="dobra" style="max-width:240px">${opcoesObras(S.f.dobra)}</select></div>
+    <div class="chips" id="dtipos"></div><div class="list" id="dlist"></div>`;
+  $("dq").oninput = () => { S.f.dq = $("dq").value; pDocs(); };
+  $("dobra").oninput = () => { S.f.dobra = $("dobra").value; pDocs(); };
+  pDocs();
+}
+function pDocs() {
+  if (!$("dlist")) return;
+  const q = (S.f.dq || "").toLowerCase(), t = S.f.dt || "", o = S.f.dobra || "";
+  const todos = [...S.docs.values()].filter(d => !o || d.obra === o);
+  const cont = {}; todos.forEach(d => (d.tipos || []).forEach(x => cont[x] = (cont[x] || 0) + 1));
+  $("dtipos").innerHTML = [["", "Todos", "", todos.length], ...TIPOS_DP.map(x => [x[0], x[1], "", cont[x[0]] || 0])].map(([k, n, , c]) => `<button data-t="${esc(k)}" aria-pressed="${t === k}">${esc(n)} <span style="opacity:.7">${c}</span></button>`).join("");
+  $("dtipos").querySelectorAll("button").forEach(b => b.onclick = () => { S.f.dt = b.dataset.t; pDocs(); });
+  const L = todos.filter(d => (!t || (d.tipos || []).includes(t)) && (!q || [d.assunto, d.deNome, d.de, obraNome(d.obra), mesLabel(mesDoc(d)), (d.anexos || []).join(" "), d.trecho].join(" ").toLowerCase().includes(q)))
+    .sort((a, b) => (b.data || "").localeCompare(a.data || ""));
+  if (!L.length) { $("dlist").innerHTML = `<div class="empty">${S.docs.size ? "Nada com esses filtros." : "Os contracheques, folhas de ponto e rescisões que chegam do DP aparecem aqui. Na primeira vez o robô busca os dos últimos 4 meses (até 10 min)."}</div>`; return; }
+  const meses = [...new Set(L.map(mesDoc))].sort().reverse();
+  $("dlist").innerHTML = meses.map(m => { const D = L.filter(d => mesDoc(d) === m);
+    return `<section class="list"><div class="mes"><h2>${esc(mesLabel(m))}</h2><span class="hint">${D.length} e-mail${D.length > 1 ? "s" : ""}</span></div>${D.map(cartaoDoc).join("")}</section>`; }).join("");
+  $("dlist").querySelectorAll("[data-d]").forEach(b => b.onclick = () => abrirDoc(b.dataset.d));
+}
+function cartaoDoc(d) {
+  const t = (d.tipos || [])[0] || "Contracheque", sig = (TIPOS_DP.find(x => x[0] === t) || TIPOS_DP[0])[2], ax = d.anexos || [];
+  return `<button class="doc" data-d="${esc(d.id)}"><span class="ico t-${esc(t)}">${sig}</span>
+    <div style="min-width:0"><h3>${esc(curto(d.assunto, d.obra))}</h3><div class="meta">${obraTag(d.obra)}${esc((d.tipos || []).join(" + "))} · ${esc(d.pasta === "sent" ? "você enviou" : d.deNome || d.de)}</div></div>
+    <span class="quando">${esc(fmtS(d.data))}</span>
+    ${ax.length ? `<div class="anx">${ax.slice(0, 4).map(a => `<span title="${esc(a)}">${ico("clipe")}${esc(a)}</span>`).join("")}${ax.length > 4 ? `<span>+${ax.length - 4}</span>` : ""}</div>` : ""}</button>`;
+}
+function abrirDoc(id) {
+  const d = S.docs.get(id); if (!d) return;
+  const kv = [["Tipo", esc((d.tipos || []).join(" + "))], ["Obra", esc(obraNome(d.obra))], ["Mês", esc(d.competencia ? mesLabel(d.competencia) : "não informado no assunto")], [d.pasta === "sent" ? "Enviado" : "Recebido", esc(fmt(d.data))],
+    ["De", `${esc(d.deNome || "")} &lt;${esc(d.de)}&gt;`], ["Para", esc((d.para || []).join(", "))]].filter(x => x[1]).map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+  abrir(`<div class="row">${obraTag(d.obra)}${(d.tipos || []).map(t => `<span class="chip">${esc(t)}</span>`).join("")}</div><h3>${esc(d.assunto)}</h3><dl class="kv">${kv}</dl>
+    ${d.trecho ? `<blockquote class="quote">“${esc(d.trecho)}”</blockquote>` : ""}
+    ${(d.anexos || []).length ? `<div><p class="hint" style="margin-bottom:6px">Anexos (${d.anexos.length})</p><div class="anx" style="display:flex;flex-wrap:wrap;gap:6px">${d.anexos.map(a => `<span>${ico("clipe")}${esc(a)}</span>`).join("")}</div></div>` : ""}
+    <p class="hint">Os arquivos continuam no seu e-mail LocaWeb. Copie o assunto e cole na busca do webmail para abrir o e-mail.</p>
+    <div class="row"><button class="btn primary" id="d-cp">Copiar assunto</button><button class="btn" id="d-x">Fechar</button></div>
+    ${isAdmin() ? `<details><summary class="hint" style="cursor:pointer">Corrigir (administrador)</summary><div class="row" style="margin-top:8px"><select id="d-obra" style="max-width:240px">${opcoesObras(d.obra, "Escolha a obra")}</select><input id="d-mes" type="month" value="${esc(d.competencia || "")}" style="max-width:170px"><button class="btn sm" id="d-sv">Salvar</button></div></details>` : ""}`, B => {
+    B.querySelector("#d-x").onclick = fechar;
+    B.querySelector("#d-cp").onclick = async () => { try { await navigator.clipboard.writeText(d.assunto); toast("Assunto copiado"); } catch (e) { toast("Não deu para copiar. Selecione o título e copie."); } };
+    B.querySelector("#d-sv") && (B.querySelector("#d-sv").onclick = async () => { try { await updateDoc(doc(db, "documentos", id), { obra: B.querySelector("#d-obra").value || d.obra, competencia: B.querySelector("#d-mes").value || null, atualizadoEm: agoraIso() }); registrar("Contracheque corrigido", id, d.assunto); toast("Salvo"); fechar(); } catch (e) { toast(erroMsg(e)); } });
+  });
 }
 
 /* ------------------------------------------------------------------ ARQUIVO */
@@ -506,13 +678,13 @@ function abrirAvisos() {
     B.querySelector("#av-lidos").onclick = async () => { const b = writeBatch(db); L.filter(a => !a.lido).forEach(a => b.update(doc(db, "avisos", a.id), { lido: true })); await b.commit(); fechar(); };
     B.querySelector("#av-limpar").onclick = async () => { const b = writeBatch(db); L.filter(a => a.lido).forEach(a => b.delete(doc(db, "avisos", a.id))); await b.commit(); fechar(); };
     B.querySelectorAll("[data-a]").forEach(el => el.onclick = async () => { const a = S.avisos.get(el.dataset.a); if (!a.lido) updateDoc(doc(db, "avisos", a.id), { lido: true }); fechar(); const r = a.ref || "";
-      if (r.startsWith("p_") && S.procs.has(r)) abrirProc(r); else if (r.startsWith("r_") && S.resps.has(r)) abrirResp(r); else if (r === "conta") mostrar("conta"); else if (isAdmin() && S.usuarios.some(u => u.uid === r)) { S.sub = "usuarios"; mostrar("ajustes"); } });
+      if (r.startsWith("p_") && S.procs.has(r)) abrirProc(r); else if (r.startsWith("d_") && S.docs.has(r)) abrirDoc(r); else if (r.startsWith("r_") && S.resps.has(r)) abrirResp(r); else if (r === "conta") mostrar("conta"); else if (isAdmin() && S.usuarios.some(u => u.uid === r)) { S.sub = "usuarios"; mostrar("ajustes"); } });
   });
 }
 
 /* ------------------------------------------------------------------ AJUSTES (administrador) */
 async function registrar(acao, alvo, detalhe) { try { await addDoc(collection(db, "log"), { acao, alvo: String(alvo || ""), detalhe: String(detalhe || "").slice(0, 300), por: S.user.uid, porNome: S.perfil.nome, em: agoraIso() }); } catch (e) { } }
-const SUBS = [["usuarios", "Usuários"], ["obras", "Obras"], ["fluxo", "Fluxo de aprovação"], ["responder", "A responder"], ["robo", "Robô"], ["importar", "Importar histórico"], ["log", "Histórico de ações"]];
+const SUBS = [["usuarios", "Usuários"], ["obras", "Obras"], ["fluxo", "Fluxo de aprovação"], ["responder", "A responder"], ["docs", "Contracheques"], ["robo", "Robô"], ["importar", "Importar histórico"], ["log", "Histórico de ações"]];
 function vAjustes() {
   if (!isAdmin()) return mostrar("fila");
   $("main").innerHTML = `<div class="subtabs" id="subs">${SUBS.map(s => `<button data-s="${s[0]}" aria-pressed="${S.sub === s[0]}">${s[1]}</button>`).join("")}</div><div id="aj" class="list"></div>`;
@@ -521,7 +693,7 @@ function vAjustes() {
 }
 function preencherAjustes() {
   if (!$("aj")) return;
-  ({ usuarios: ajUsuarios, obras: ajObras, fluxo: ajFluxo, responder: ajResponder, robo: ajRobo, importar: ajImportar, log: ajLog }[S.sub] || ajUsuarios)();
+  ({ usuarios: ajUsuarios, obras: ajObras, fluxo: ajFluxo, responder: ajResponder, docs: ajDocs, robo: ajRobo, importar: ajImportar, log: ajLog }[S.sub] || ajUsuarios)();
 }
 function resumoPerm(u) { if (u.papel === "admin") return "Administrador"; const v = u.ver || {}; return [u.papel === "leitura" ? "Só leitura" : "Usuário", v.tudo ? "todas as obras" : [v.proprios ? "próprios" : "", (v.obras || []).join(", ")].filter(Boolean).join(" + ") || "nada liberado", u.rh ? "RH" : ""].filter(Boolean).join(" · "); }
 function ajUsuarios() {
@@ -542,7 +714,7 @@ function formPerm(u) {
     <label class="check"><input type="checkbox" id="p-prop"${v.proprios !== false ? " checked" : ""}> Os próprios fluxos (e os que recebe em cópia)</label>
     <label class="check"><input type="checkbox" id="p-tudo"${v.tudo ? " checked" : ""}> Todas as obras</label>
     <div class="tags" id="p-obras">${S.obras.map(o => `<label class="check tag" style="padding-right:10px"><input type="checkbox" value="${esc(o.codigo)}"${(v.obras || []).includes(o.codigo) ? " checked" : ""}> ${esc(obraNome(o.codigo))}</label>`).join("")}</div></fieldset>
-    <label class="check"><input type="checkbox" id="p-rh"${u.rh ? " checked" : ""}> Ver RH e exames (admissões, mudanças de função, ASO)</label>
+    <label class="check"><input type="checkbox" id="p-rh"${u.rh ? " checked" : ""}> Ver RH: contracheques, folhas de ponto, rescisões, admissões e exames</label>
     <label class="check"><input type="checkbox" id="p-con"${u.podeConectar !== false ? " checked" : ""}> Pode conectar o próprio e-mail LocaWeb</label>
     <label class="check"><input type="checkbox" id="p-enc"${u.podeEncerrar ? " checked" : ""}> Pode encerrar e reabrir processos</label>`;
 }
@@ -628,6 +800,23 @@ function ajResponder() {
     <div class="row"><button class="btn primary">Salvar</button></div></form>`;
   $("fr2").onsubmit = async e => { e.preventDefault(); const d = { responder: { remetentes: linhas($("r-rem").value).map(x => x.toLowerCase()), modo: $("fr2").querySelector("input[name=modo]:checked").value, palavras: linhas($("r-pal").value) } };
     try { await updateDoc(doc(db, "config", "geral"), d); registrar("A responder alterado", "config/geral", d.responder.remetentes.join(", ")); toast("Salvo"); } catch (err) { toast(erroMsg(err)); } };
+}
+const DP_PADRAO = { remetentes: ["dp@cearamendes.com.br", "rh@cearamendes.com.br"], diasIniciais: 120, tipos: [
+  { nome: "Contracheque", palavras: ["contracheque", "contracheques", "contra-cheque", "contra cheque", "holerite", "recibo de pagamento", "folha de pagamento", "adiantamento quinzenal", "adiantamento salarial"] },
+  { nome: "Ponto", palavras: ["folha de ponto", "folhas de ponto", "espelho de ponto", "espelhos de ponto", "cartao de ponto", "cartoes de ponto", "ponto eletronico", "registro de ponto"] },
+  { nome: "Rescisão", palavras: ["rescisao", "rescisorio", "rescisorios", "documentos rescisorios", "aviso previo", "comunicado de dispensa"] }] };
+function ajDocs() {
+  const c = { ...DP_PADRAO, ...(S.cfg.documentosDP || {}) };
+  const pal = n => ((c.tipos || []).find(t => t.nome === n) || DP_PADRAO.tipos.find(t => t.nome === n) || {}).palavras || [];
+  $("aj").innerHTML = `<form id="fdp" class="card" style="display:grid;gap:10px"><h2>Contracheques</h2><p class="hint">E-mails com estas palavras no assunto vão para a aba Contracheques e não entram em “A responder”. Só quem tem permissão de RH vê essa aba.</p>
+    <div class="grid2f">${TIPOS_DP.map(t => `<label class="f">${esc(t[1])} <span class="opt">(uma por linha, sem acento)</span><textarea id="dp-${t[2]}" rows="7">${esc(pal(t[0]).join("\n"))}</textarea></label>`).join("")}
+    <label class="f">Remetentes do DP/RH <span class="opt">(o robô também olha o começo do texto desses e-mails)</span><textarea id="dp-rem" rows="7">${esc((c.remetentes || []).join("\n"))}</textarea></label></div>
+    <label class="f" style="max-width:260px">Busca nos e-mails antigos (dias)<input id="dp-dias" type="number" value="${esc(c.diasIniciais ?? 120)}"></label>
+    <div class="row"><button class="btn primary">Salvar</button><button class="btn" type="button" id="dp-ref">Buscar de novo os antigos</button></div>
+    <p class="hint">${c.refazerEm ? "Nova busca pedida em " + esc(fmt(c.refazerEm)) + ". " : ""}Use “Buscar de novo” depois de acrescentar palavras: o robô procura nos e-mails antigos na próxima rodada, sem duplicar.</p></form>`;
+  const ler = () => ({ ...c, remetentes: linhas($("dp-rem").value).map(x => x.toLowerCase()), diasIniciais: Number($("dp-dias").value) || 120, tipos: TIPOS_DP.map(t => ({ nome: t[0], palavras: linhas($("dp-" + t[2]).value).map(x => x.toLowerCase()) })) });
+  $("fdp").onsubmit = async e => { e.preventDefault(); try { await updateDoc(doc(db, "config", "geral"), { documentosDP: ler() }); registrar("Contracheques alterado", "config/geral", ""); toast("Salvo. Vale na próxima rodada do robô."); } catch (err) { toast(erroMsg(err)); } };
+  $("dp-ref").onclick = async () => { try { await updateDoc(doc(db, "config", "geral"), { documentosDP: { ...ler(), refazerEm: agoraIso() } }); registrar("Contracheques: nova busca", "config/geral", ""); toast("Pedido feito. O robô busca os antigos na próxima rodada."); } catch (err) { toast(erroMsg(err)); } };
 }
 function ajRobo() {
   const c = S.cfg, r = S.robo || {}, rs = r.resumo || {};

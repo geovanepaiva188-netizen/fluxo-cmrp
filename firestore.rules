@@ -86,6 +86,14 @@ service cloud.firestore {
       }
     }
 
+    // ---------- contracheques, folhas de ponto e rescisões (sempre RH) ----------
+    match /documentos/{d} {
+      allow read: if podeVer(resource.data);
+      allow update: if admin() && soMuda(['obra', 'competencia', 'tipos', 'atualizadoEm']);
+      allow create: if false;
+      allow delete: if admin();
+    }
+
     // ---------- "A responder" ----------
     match /responder/{r} {
       allow read: if ativo() && (resource.data.dono == uid() || admin());

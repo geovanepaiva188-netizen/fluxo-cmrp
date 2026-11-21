@@ -8,7 +8,8 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 class StoreFirestore:
     def __init__(self, db):
         self.db = db
-        self._procs, self._resps = {}, {}
+        self._procs, self._resps, self._docs = {}, {}, {}
+        self._sujos_d = set()
         self._sujos_p, self._sujos_r = set(), set()
         self._avisos = {}
         self._chaves_p, self._chaves_r = set(), set()
@@ -60,6 +61,17 @@ class StoreFirestore:
             self._chaves_r.add((dono, k))
         return [r for r in self._resps.values() if r.get('dono') == dono and r.get('chave') == k]
 
+    # ---- documentos do DP / RH
+    def get_doc(self, i):
+        if i not in self._docs:
+            d = self.db.collection('documentos').document(i).get()
+            self._docs[i] = dict(d.to_dict(), id=i) if d.exists else None
+        return self._docs.get(i)
+
+    def put_doc(self, d):
+        self._docs[d['id']] = d
+        self._sujos_d.add(d['id'])
+
     # ---- avisos
     def aviso(self, para, titulo, texto, ref=None):
         i = 'a_' + hashlib.sha1(f'{para}|{ref}|{titulo}|{texto}'.encode()).hexdigest()[:18]
@@ -81,6 +93,9 @@ class StoreFirestore:
         for i in self._sujos_r:
             d = {k: v for k, v in self._resps[i].items() if k != 'id'}
             ops.append((self.db.collection('responder').document(i), d))
+        for i in self._sujos_d:
+            d = {k: v for k, v in self._docs[i].items() if k != 'id'}
+            ops.append((self.db.collection('documentos').document(i), d))
         for i, a in self._avisos.items():
             ref = self.db.collection('avisos').document(i)
             if not ref.get().exists:  # não reabre aviso já lido
@@ -94,5 +109,6 @@ class StoreFirestore:
             b.commit()
         self._sujos_p.clear()
         self._sujos_r.clear()
+        self._sujos_d.clear()
         self._avisos.clear()
         return n

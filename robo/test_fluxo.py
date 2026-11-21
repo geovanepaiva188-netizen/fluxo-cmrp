@@ -170,3 +170,92 @@ def test_leitura_email_e_pastas():
         def list(self):
             return 'OK', [b'(\\HasNoChildren) "." "INBOX.rascunho"', b'(\\HasNoChildren) "." "INBOX.enviadas"', b'(\\HasChildren) "." INBOX']
     assert main.pasta_enviados(FakeM(), '') == 'INBOX.enviadas'
+
+
+def test_documentos_dp():
+    from fluxo import tipos_dp, competencia
+    s = StoreMemoria()
+    m = Motor(CFG, OBRAS, s, GEO, CONTAS)
+    # assuntos reais da caixa
+    assert tipos_dp('162 – CONSORCIO BORBOREMA II - CONTRACHEQUE E FOLHA DE PONTO 10/2026', '', 'dp@cearamendes.com.br', CFG) == ['Contracheque', 'Ponto']
+    assert tipos_dp('162 – CONSORCIO BORBOREMA II - ADIANTAMENTO QUINZENAL 11/2026', '', 'dp@cearamendes.com.br', CFG) == ['Contracheque']
+    assert tipos_dp('162 - Aviso Prévio Trabalho - Fagner de Jesus', '', 'dp@cearamendes.com.br', CFG) == ['Rescisão']
+    assert tipos_dp('162 - Borborema II - Solicitação de Recibos de Terceiros – BM 03', 'Segue recibo.', 'dp@cearamendes.com.br', CFG) == []
+    assert tipos_dp('157 - Nova Olinda - NF da OC 020/157', 'Como será o pagamento?', 'mariana@cearamendes.com.br', CFG) == []
+    assert competencia('CONTRACHEQUE E FOLHA DE PONTO 10/2026') == '2026-10'
+    assert competencia('Fornecimento – 29/09 a 30/10/2026') is None
+    assert competencia('Espelho de ponto - outubro de 2026') == '2026-10'
+
+    a = '162 – CONSORCIO BORBOREMA II - CONTRACHEQUE E FOLHA DE PONTO 10/2026'
+    e = msg('in', 'dp@cearamendes.com.br', ['geovane@cmrp-pb.com.br'], a, 'Boa tarde! Encaminho, em anexo, os contracheques.', '2026-11-05T16:21')
+    e.update(mid='<abc@locaweb>', anexos=['Contracheques 10-2026.pdf', 'Ponto 10-2026.pdf'])
+    m.processar(e)
+    (d,) = s.docs.values()
+    assert d['tipos'] == ['Contracheque', 'Ponto'] and d['obra'] == '162' and d['competencia'] == '2026-10'
+    assert d['anexos'] == ['Contracheques 10-2026.pdf', 'Ponto 10-2026.pdf'] and d['rh'] is True and d['dono'] == 'u_geo'
+    assert not s.resps  # não entra em "A responder"
+    # o mesmo e-mail visto pela conta do Victor: não duplica, só passa a aparecer para ele
+    m2 = Motor(CFG, OBRAS, s, VIC, {**CONTAS, 'victor@cearamendes.com.br': VIC})
+    m2.processar(dict(e))
+    (d,) = s.docs.values()
+    assert d['copias'] == ['u_vic']
+
+
+def test_dp_retroativo_tira_do_a_responder():
+    s = StoreMemoria()
+    m = Motor(CFG, OBRAS, s, GEO, CONTAS)
+    a = '162 - Borborema II - Comunicado de Dispensa - João dos Santos Silva'
+    # item antigo que entrou em "A responder" antes desta versão
+    from fluxo import rid, chave
+    s.put_resp({'id': rid('u_geo', chave(a), 'dp@cearamendes.com.br'), 'dono': 'u_geo', 'chave': chave(a), 'status': 'aguardando',
+                'de': 'dp@cearamendes.com.br', 'recebidoEm': '2026-11-16T14:47'})
+    e = msg('in', 'dp@cearamendes.com.br', ['geovane@cmrp-pb.com.br'], a, 'Boa tarde! Seguem em anexo os documentos rescisórios.', '2026-11-16T14:47')
+    e['soDP'] = True
+    m.processar(e)
+    (r,) = s.resps.values()
+    assert r['status'] == 'arquivado' and 'Contracheques' in r['motivo']
+    (d,) = s.docs.values()
+    assert d['tipos'] == ['Rescisão']
+    # retroativo não cria processos nem mexe em fluxos
+    e2 = msg('sent', 'geovane@cmrp-pb.com.br', ['sandra@cearamendes.com.br'], ASS, PEDIDO, '2026-11-18T08:27')
+    e2['soDP'] = True
+    m.processar(e2)
+    assert not s.procs
+
+
+def test_leitura_com_anexos_e_retroativo(monkeypatch):
+    import main
+    raw = (b"From: DP <dp@cearamendes.com.br>\r\nTo: geovane@cmrp-pb.com.br\r\nSubject: 162 - CONTRACHEQUE 10/2026\r\n"
+           b"Message-ID: <x1@lw>\r\nDate: Thu, 05 Nov 2026 16:21:00 -0300\r\nMIME-Version: 1.0\r\n"
+           b"Content-Type: multipart/mixed; boundary=b1\r\n\r\n--b1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSegue.\r\n--b1\r\n"
+           b"Content-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\n\r\nJVBERi0x")  # cortado
+    estrutura = b'1 (UID 7 BODYSTRUCTURE (("text" "plain" NIL NIL NIL "7bit" 6 1)("application" "pdf" ("name" "a.pdf") NIL NIL "base64" 9 NIL ("attachment" ("filename" "a.pdf")))("application" "pdf" ("name" "=?utf-8?q?Folha_de_ponto_10-2026.pdf?=") NIL NIL "base64" 9 NIL ("attachment" ("filename" "=?utf-8?q?Folha_de_ponto_10-2026.pdf?=")))("image" "png" ("name" "logo.png") NIL NIL "base64" 9) "mixed") BODY[]<0> {300}'
+
+    class FakeIMAP:
+        buscas = []
+
+        def __init__(self, *a, **k): pass
+        def login(self, *a): pass
+        def list(self): return 'OK', [b'(\\HasNoChildren \\Sent) "." "INBOX.enviadas"']
+        def select(self, n, readonly): return 'OK', [b'1']
+        def response(self, k): return k, [b'9']
+        def logout(self): pass
+
+        def uid(self, cmd, *a):
+            if cmd == 'SEARCH':
+                FakeIMAP.buscas.append(a[1])
+                return 'OK', [b'7']
+            return 'OK', [(estrutura, raw), b')']
+
+    monkeypatch.setattr(main.imaplib, 'IMAP4_SSL', FakeIMAP)
+    msgs, novo = main.ler_conta({'imap': {}}, 'g@x', 's', {})
+    normais = [x for x in msgs if not x.get('soDP')]
+    retro = [x for x in msgs if x.get('soDP')]
+    assert len(normais) == 2 and len(retro) == 2  # INBOX + enviados, nas duas leituras
+    assert normais[0]['mid'] == '<x1@lw>' and normais[0]['anexos'] == ['a.pdf', 'Folha de ponto 10-2026.pdf']
+    assert 'retroativo' in novo['DP'] and novo['INBOX']['ultimoUid'] == 7
+    assert any('SUBJECT "contracheque"' in b and b.startswith('SINCE') for b in FakeIMAP.buscas)
+    # na rodada seguinte a busca retroativa não se repete
+    FakeIMAP.buscas = []
+    main.ler_conta({'imap': {}}, 'g@x', 's', novo)
+    assert not any('SUBJECT' in b for b in FakeIMAP.buscas)

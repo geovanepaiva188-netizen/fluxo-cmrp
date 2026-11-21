@@ -20,6 +20,7 @@ import time
 import traceback
 from datetime import datetime, timedelta, timezone
 from email import policy
+from email.header import decode_header, make_header
 from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
@@ -32,7 +33,7 @@ from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from config_padrao import CONFIG_GERAL, OBRAS
-from fluxo import Motor, casar_maquina, numero_bm, periodo_texto, proximo_periodo
+from fluxo import DP_BUSCA, cfg_dp, Motor, casar_maquina, numero_bm, periodo_texto, proximo_periodo
 from store_firestore import StoreFirestore
 
 TZ = ZoneInfo('America/Sao_Paulo')
@@ -96,7 +97,37 @@ def corpo(msg):
         return ''
 
 
-def para_msg(raw, pasta):
+NOME_ANEXO = re.compile(r'"(?:file)?name\*?"\s+"([^"]+)"', re.I)
+
+
+def anexos(msg, estrutura=''):
+    """Nomes dos anexos: do BODYSTRUCTURE (todos) e do começo da mensagem (os que couberam)."""
+    nomes = []
+    for n in NOME_ANEXO.findall(estrutura or ''):
+        try:
+            n = str(make_header(decode_header(n)))
+        except Exception:
+            pass
+        nomes.append(n)
+    try:
+        for parte in msg.iter_attachments():
+            if parte.get_filename():
+                nomes.append(parte.get_filename())
+    except Exception:
+        pass
+    vistos, out = set(), []
+    for n in nomes:
+        n = n.strip()
+        if not n or n.lower() in vistos:
+            continue
+        if re.search(r'\.(png|jpe?g|gif|bmp)$', n, re.I) and not re.search(r'(ponto|contra|holerite|recibo)', n, re.I):
+            continue  # imagens de assinatura
+        vistos.add(n.lower())
+        out.append(n)
+    return out
+
+
+def para_msg(raw, pasta, estrutura=''):
     m = email.message_from_bytes(raw, policy=policy.default)
     try:
         d = parsedate_to_datetime(m['date']).astimezone(TZ)
@@ -108,6 +139,7 @@ def para_msg(raw, pasta):
         'para': [a.lower() for _, a in getaddresses([str(x) for x in m.get_all('to', [])]) if a],
         'cc': [a.lower() for _, a in getaddresses([str(x) for x in m.get_all('cc', [])]) if a],
         'data': d.strftime('%Y-%m-%dT%H:%M'), 'corpo': corpo(m),
+        'mid': str(m['message-id'] or '').strip(), 'anexos': anexos(m, estrutura),
     }
 
 
@@ -139,6 +171,55 @@ def pasta_enviados(M, preferida):
     return None
 
 
+def _imap_data(d):
+    return f'{d.day:02d}-{MESES_IMAP[d.month - 1]}-{d.year}'
+
+
+def baixar(M, uids, tipo, limite, rotulo, so_dp=False):
+    """Lê as mensagens em lotes de 10. Devolve (mensagens, último UID lido, parou_antes_do_fim)."""
+    msgs, feito = [], 0
+    for j in range(0, len(uids), 10):
+        parte = uids[j:j + 10]
+        try:
+            # BODYSTRUCTURE dá o nome de todos os anexos; do corpo só vem o começo (texto, sem anexos pesados)
+            typ, data = M.uid('FETCH', ','.join(map(str, parte)), '(BODYSTRUCTURE BODY.PEEK[]<0.150000>)')
+        except Exception as e:  # servidor cortou a conexão: guarda o que já leu e segue na próxima rodada
+            log(f'{rotulo}: conexão interrompida ({type(e).__name__}); continua na próxima rodada')
+            return msgs, feito, True
+        atual = None
+        for item in (data or []) + [None]:
+            if isinstance(item, tuple) and len(item) == 2:
+                if atual:
+                    msgs.append(atual)
+                atual = [item[0], item[1]]
+            elif isinstance(item, bytes) and atual:
+                atual[0] += item
+            elif item is None and atual:
+                msgs.append(atual)
+        feito = max(parte)
+        if time.time() > limite:
+            log(f'{rotulo}: tempo esgotado, continua na próxima rodada')
+            return _converter(msgs, tipo, so_dp), feito, True
+    return _converter(msgs, tipo, so_dp), feito, False
+
+
+def _converter(brutos, tipo, so_dp):
+    out = []
+    for b in brutos:
+        if isinstance(b, dict):
+            out.append(b)
+            continue
+        cab, raw = b
+        try:
+            m = para_msg(raw, tipo, cab.decode(errors='replace') if isinstance(cab, bytes) else str(cab))
+            if so_dp:
+                m['soDP'] = True
+            out.append(m)
+        except Exception:
+            pass
+    return out
+
+
 def ler_conta(cfg, email_conta, senha, estado):
     imap = cfg.get('imap', {})
     M = imaplib.IMAP4_SSL(imap.get('host', 'email-ssl.com.br'), int(imap.get('porta', 993)), timeout=60)
@@ -148,6 +229,7 @@ def ler_conta(cfg, email_conta, senha, estado):
         msgs, novo = [], dict(estado or {})
         limite = time.time() + 300  # no máximo 5 min por conta; o resto fica para a próxima rodada
         desde = datetime.now(TZ) - timedelta(days=int(cfg.get('diasIniciais', 20)))
+        parou = False
         for chave_p, nome, tipo in (('INBOX', 'INBOX', 'in'), ('SENT', sent, 'sent')):
             if not nome:
                 continue
@@ -158,34 +240,41 @@ def ler_conta(cfg, email_conta, senha, estado):
             uidvalidity = int(uv[0]) if uv and uv[0] else 0
             st = estado.get(chave_p) or {}
             ultimo = int(st.get('ultimoUid') or 0) if st.get('uidvalidity') == uidvalidity else 0
-            crit = f'UID {ultimo + 1}:*' if ultimo else f'SINCE {desde.day:02d}-{MESES_IMAP[desde.month - 1]}-{desde.year}'
+            crit = f'UID {ultimo + 1}:*' if ultimo else f'SINCE {_imap_data(desde)}'
             typ, data = M.uid('SEARCH', None, crit)
             uids = sorted(int(x) for x in (data[0].split() if data and data[0] else []) if int(x) > ultimo)[-MAX_POR_PASTA:]
             log(f'{chave_p}: {len(uids)} e-mails novos')
-            feito, parou = ultimo, False
-            for j in range(0, len(uids), 10):
-                parte = uids[j:j + 10]
-                try:
-                    typ, data = M.uid('FETCH', ','.join(map(str, parte)), '(BODY.PEEK[]<0.150000>)')  # só o começo: texto sem anexos pesados
-                except Exception as e:  # servidor cortou a conexão: guarda o que já leu e segue na próxima rodada
-                    log(f'{chave_p}: conexão interrompida ({type(e).__name__}); continua na próxima rodada')
-                    parou = True
-                    break
-                for item in data or []:
-                    if isinstance(item, tuple) and len(item) == 2:
-                        try:
-                            msgs.append(para_msg(item[1], tipo))
-                        except Exception:
-                            pass
-                feito = max(parte)
-                if time.time() > limite:
-                    log(f'{chave_p}: tempo esgotado, continua na próxima rodada')
-                    parou = True
-                    break
+            lidos, feito, parou = baixar(M, uids, tipo, limite, chave_p)
+            msgs += lidos
+            feito = feito or ultimo
             novo[chave_p] = {'uidvalidity': uidvalidity, 'ultimoUid': feito, 'nome': nome}
             log(f'{chave_p}: {len([u for u in uids if u <= feito])} lidos')
             if parou:
                 break
+        # busca retroativa (uma vez): contracheques, pontos e rescisões mais antigos, procurados pelo assunto no servidor
+        dp = cfg_dp(cfg)
+        st_dp = estado.get('DP') or {}
+        refazer = str(dp.get('refazerEm') or '')
+        if not parou and (not st_dp.get('retroativo') or refazer > st_dp.get('retroativo', '')):
+            ini = datetime.now(TZ) - timedelta(days=int(dp.get('diasIniciais') or 120))
+            termos = [f'SUBJECT "{t}"' for t in DP_BUSCA]
+            ou = termos[-1]
+            for t in reversed(termos[:-1]):
+                ou = f'OR {t} {ou}'
+            total = 0
+            for nome, tipo in (('INBOX', 'in'), (sent, 'sent')):
+                if not nome or M.select(_q(nome), readonly=True)[0] != 'OK':
+                    continue
+                typ, data = M.uid('SEARCH', None, f'SINCE {_imap_data(ini)} {ou}')
+                uids = sorted(int(x) for x in (data[0].split() if data and data[0] else []))[-400:]
+                lidos, _, parou = baixar(M, uids, tipo, limite, 'DP ' + nome, so_dp=True)
+                msgs += lidos
+                total += len(lidos)
+                if parou:
+                    break
+            if not parou:
+                novo['DP'] = {'retroativo': datetime.now(TZ).strftime('%Y-%m-%dT%H:%M')}
+            log(f'DP retroativo: {total} e-mails conferidos' + (' (continua na próxima rodada)' if parou else ''))
         return msgs, novo
     finally:
         try:

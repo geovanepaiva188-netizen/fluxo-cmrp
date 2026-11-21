@@ -226,6 +226,64 @@ def eh_rh(assunto, tipo):
     return tipo == 'Admissão' or bool(RH.search(norm(assunto)))
 
 
+# ---------------------------------------------------------------- documentos do DP / RH
+
+DP_PADRAO = {
+    'remetentes': ['dp@cearamendes.com.br', 'rh@cearamendes.com.br'],
+    'diasIniciais': 120,
+    'tipos': [
+        {'nome': 'Contracheque', 'palavras': ['contracheque', 'contracheques', 'contra-cheque', 'contra cheque', 'holerite',
+                                              'recibo de pagamento', 'folha de pagamento', 'adiantamento quinzenal',
+                                              'adiantamento salarial']},
+        {'nome': 'Ponto', 'palavras': ['folha de ponto', 'folhas de ponto', 'espelho de ponto', 'espelhos de ponto',
+                                       'cartao de ponto', 'cartoes de ponto', 'ponto eletronico', 'registro de ponto']},
+        {'nome': 'Rescisão', 'palavras': ['rescisao', 'rescisorio', 'rescisorios', 'documentos rescisorios', 'aviso previo',
+                                          'comunicado de dispensa']},
+    ],
+}
+# termos curtos para a busca no servidor (o classificador acima confirma depois)
+DP_BUSCA = ['contracheque', 'contra-cheque', 'contra cheque', 'holerite', 'ponto', 'adiantamento', 'rescis', 'aviso pr', 'dispensa',
+            'folha de pagamento', 'recibo de pagamento']
+
+
+def cfg_dp(cfg):
+    c = dict(DP_PADRAO)
+    c.update({k: v for k, v in (cfg.get('documentosDP') or {}).items() if v not in (None, [], '')})
+    return c
+
+
+def tipos_dp(assunto, corpo, de, cfg):
+    """Lista de tipos (ex.: ['Contracheque', 'Ponto']) ou [] se não for documento do DP/RH."""
+    c = cfg_dp(cfg)
+    t = norm(limpar_assunto(assunto))
+    achados = [tp['nome'] for tp in c['tipos'] if tem_palavra(t, tp.get('palavras') or [])]
+    if not achados and (de or '').lower() in {e.lower() for e in c.get('remetentes') or []}:
+        inicio = norm((topo(corpo) or corpo or '')[:400])
+        achados = [tp['nome'] for tp in c['tipos'] if tem_palavra(inicio, tp.get('palavras') or [])]
+    return achados
+
+
+MESES_NOMES = ['janeiro', 'fevereiro', 'marco', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro',
+               'novembro', 'dezembro']
+
+
+def competencia(assunto, corpo=''):
+    """Mês de referência 'aaaa-mm' escrito no assunto (ou no começo do texto)."""
+    for txt in (assunto or '', (topo(corpo) or corpo or '')[:500]):
+        t = norm(txt)
+        m = re.search(r'(?<![\d/])(0?[1-9]|1[0-2])\s*/\s*(20\d{2})(?!\d)', t)
+        if m:
+            return f'{m.group(2)}-{int(m.group(1)):02d}'
+        m = re.search(r'\b(' + '|'.join(MESES_NOMES) + r')\b\s*(?:de|/|-)?\s*(20\d{2})', t)
+        if m:
+            return f'{m.group(2)}-{MESES_NOMES.index(m.group(1)) + 1:02d}'
+    return None
+
+
+def did(mid, de, data, assunto):
+    return 'd_' + hashlib.sha1((mid or f'{de}|{data}|{assunto}').encode(errors='replace')).hexdigest()[:18]
+
+
 def pid(chave_, solicitante, ciclo=''):
     return 'p_' + hashlib.sha1(f'{chave_}|{solicitante}|{ciclo}'.encode()).hexdigest()[:18]
 
@@ -308,6 +366,11 @@ class Motor:
         k = chave(m['assunto'])
         if not k:
             return
+        if m.get('soDP'):  # busca retroativa: só documentos do DP, sem mexer nos fluxos
+            tipos = tipos_dp(m['assunto'], m['corpo'], de, self.cfg)
+            if tipos:
+                self._doc_dp(m, de, k, tipos)
+            return
         # 1) mensagem de um aprovador ligada a um pedido existente
         if self.etapa_de(de):
             self._resposta_aprovador(m, de, dest, k)
@@ -324,8 +387,12 @@ class Motor:
                 if p.get('solicitanteEmail') == de and p.get('status') in ('devolvido', 'conferir'):
                     self._reenvio(p, m, 'Reenviado pela mesma conversa')
                     return
-        # 4) "A responder"
-        if m['pasta'] == 'in' and de in self.remetentes:
+        # 4) contracheques, folhas de ponto e rescisões: aba própria, não entram em "A responder"
+        tipos = tipos_dp(m['assunto'], m['corpo'], de, self.cfg)
+        if tipos:
+            self._doc_dp(m, de, k, tipos)
+        # 5) "A responder"
+        elif m['pasta'] == 'in' and de in self.remetentes:
             self._responder_entrada(m, de, k)
         if m['pasta'] == 'sent' and eh_resposta(m['assunto']):
             self._responder_saida(m, k, dest)
@@ -493,6 +560,36 @@ class Motor:
 
     def _primeira_base(self, p):
         return self._idx(p, self.etapas_base[0]) if self.etapas_base else 0
+
+    # ----- documentos do DP / RH
+    def _doc_dp(self, m, de, k, tipos):
+        assunto = limpar_assunto(m['assunto'])
+        d_id = did(m.get('mid'), de, m['data'], m['assunto'])
+        d = self.s.get_doc(d_id)
+        if d:
+            antes = list(d.get('copias') or [])
+            self._visiveis(d)
+            if d['copias'] != antes:
+                self.s.put_doc(d)
+        else:
+            obra = detectar_obra(assunto, self.obras)
+            dest = [x.lower() for x in m.get('para', []) + m.get('cc', [])]
+            d = {'id': d_id, 'assunto': assunto, 'chave': k, 'tipos': tipos, 'de': de,
+                 'deNome': self._quem_nome(de, m['de'][1]), 'para': dest[:6], 'data': m['data'],
+                 'pasta': m['pasta'], 'obra': obra or 'SEM_OBRA', 'competencia': competencia(assunto, m['corpo']),
+                 'anexos': list(dict.fromkeys(m.get('anexos') or []))[:30], 'trecho': recado(m['corpo'], 240),
+                 'rh': True, 'dono': self.conta['uid'], 'copias': [], 'criadoEm': agora_iso()}
+            self.s.put_doc(d)
+            if not m.get('soDP'):
+                self.s.aviso(self.conta['uid'], f'{" e ".join(tipos)} chegou', assunto, d_id)
+        # se já tinha entrado em "A responder", sai de lá
+        if m['pasta'] == 'in':
+            r = self.s.get_resp(rid(self.conta['uid'], k, de))
+            if r and r.get('status') == 'aguardando':
+                r.update({'status': 'arquivado', 'resolvidoEm': m['data'], 'atualizadoEm': agora_iso(),
+                          'motivo': 'Documento do DP: está na aba Contracheques'})
+                r.setdefault('historico', []).append({'tipo': 'arquivado', 'em': m['data']})
+                self.s.put_resp(r)
 
     # ----- "A responder"
     def _responder_entrada(self, m, de, k):

@@ -4,7 +4,7 @@ import hashlib
 
 class StoreMemoria:
     def __init__(self, admins=None):
-        self.procs, self.resps, self.avisos = {}, {}, {}
+        self.procs, self.resps, self.avisos, self.docs = {}, {}, {}, {}
         self._admins = admins or []
 
     def get_proc(self, i):
@@ -24,6 +24,12 @@ class StoreMemoria:
 
     def resp_por_chave(self, dono, k):
         return [r for r in self.resps.values() if r.get('dono') == dono and r.get('chave') == k]
+
+    def get_doc(self, i):
+        return self.docs.get(i)
+
+    def put_doc(self, d):
+        self.docs[d['id']] = d
 
     def aviso(self, para, titulo, texto, ref=None):
         i = 'a_' + hashlib.sha1(f'{para}|{ref}|{titulo}|{texto}'.encode()).hexdigest()[:18]
