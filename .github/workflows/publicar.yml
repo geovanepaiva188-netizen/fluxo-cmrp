@@ -23,7 +23,7 @@ jobs:
       - name: Publicar
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
-          PROJETO: ${{ vars.FIREBASE_PROJECT_ID }}
+          PROJETO: fluxo-de-email
         run: firebase deploy --only hosting,firestore:rules,firestore:indexes --project "$PROJETO" --non-interactive
       - if: always()
         run: rm -f "$RUNNER_TEMP/sa.json"
