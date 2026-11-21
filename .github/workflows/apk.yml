@@ -1,0 +1,41 @@
+name: Gerar APK
+# Gera o app Android. Ele abre o site do Fluxo CMRP, então melhorias nas telas chegam sem reinstalar.
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Montar projeto Android
+        working-directory: android-app
+        env:
+          PROJETO: ${{ vars.FIREBASE_PROJECT_ID }}
+        run: |
+          sed -i "s#PROJETO#${PROJETO}#g" capacitor.config.json www/index.html
+          npm install --silent
+          npx cap add android
+          mkdir -p assets && cp ../web/icone-512.png assets/icon-only.png && cp ../web/icone-512.png assets/icon-foreground.png
+          npx @capacitor/assets generate --android --iconBackgroundColor '#0f6b55' || echo "ícones padrão"
+          npx cap sync android
+      - name: Compilar APK
+        working-directory: android-app/android
+        run: ./gradlew assembleDebug --no-daemon -q
+      - name: Renomear
+        run: cp android-app/android/app/build/outputs/apk/debug/app-debug.apk FluxoCMRP.apk
+      - name: Publicar para download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Fluxo CMRP — Android ${{ github.run_number }}
+          body: Baixe o FluxoCMRP.apk no celular Android e instale (permita "instalar apps desconhecidos" quando o celular pedir).
+          files: FluxoCMRP.apk
