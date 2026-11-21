@@ -1,0 +1,20 @@
+name: Manutenção mensal
+# O GitHub pausa rotinas de repositórios sem movimento por 60 dias. Este commit mensal evita a pausa do robô.
+on:
+  schedule:
+    - cron: '17 12 1 * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  manter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          git config user.name "robo-fluxo"
+          git config user.email "robo-fluxo@users.noreply.github.com"
+          date -u +%Y-%m-%dT%H:%MZ > .ultima-manutencao
+          git add .ultima-manutencao
+          git commit -m "Manutenção mensal (mantém o robô ativo)"
+          git push
