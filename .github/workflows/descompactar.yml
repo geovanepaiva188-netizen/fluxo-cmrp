@@ -1,0 +1,23 @@
+name: Descompactar envio
+# Rotina temporária: abre o fluxo-cmrp.zip enviado pelo navegador e coloca os arquivos no repositório.
+on:
+  push:
+    paths: ['fluxo-cmrp.zip', '.github/workflows/descompactar.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  descompactar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Abrir o zip (menos a pasta .github, que é criada pelo editor)
+        run: |
+          test -f fluxo-cmrp.zip || exit 0
+          unzip -o -q fluxo-cmrp.zip -x '.github/*' -d .
+          git rm -q fluxo-cmrp.zip
+          git config user.name "robo-fluxo"
+          git config user.email "robo-fluxo@users.noreply.github.com"
+          git add -A
+          git commit -m "Descompacta o código do Fluxo CMRP"
+          git push
