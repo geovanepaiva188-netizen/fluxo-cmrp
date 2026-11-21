@@ -159,9 +159,10 @@ def ler_conta(cfg, email_conta, senha, estado):
             crit = f'UID {ultimo + 1}:*' if ultimo else f'SINCE {desde.day:02d}-{MESES_IMAP[desde.month - 1]}-{desde.year}'
             typ, data = M.uid('SEARCH', None, crit)
             uids = sorted(int(x) for x in (data[0].split() if data and data[0] else []) if int(x) > ultimo)[-MAX_POR_PASTA:]
+            log(f'{chave_p}: {len(uids)} e-mails novos')
             for j in range(0, len(uids), 25):
                 lote = ','.join(str(u) for u in uids[j:j + 25])
-                typ, data = M.uid('FETCH', lote, '(BODY.PEEK[])')
+                typ, data = M.uid('FETCH', lote, '(BODY.PEEK[]<0.150000>)')  # só o começo: texto sem anexos pesados
                 for item in data or []:
                     if isinstance(item, tuple) and len(item) == 2:
                         try:
