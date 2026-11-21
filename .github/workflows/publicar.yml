@@ -1,0 +1,29 @@
+name: Publicar app
+# Publica o site (PC e celular) e as regras de segurança no Firebase.
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', 'firestore.rules', 'firestore.indexes.json', 'firebase.json']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm i -g firebase-tools@13 --silent
+      - name: Credencial
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: printf '%s' "$SA" > "$RUNNER_TEMP/sa.json"
+      - name: Publicar
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
+          PROJETO: ${{ vars.FIREBASE_PROJECT_ID }}
+        run: firebase deploy --only hosting,firestore:rules,firestore:indexes --project "$PROJETO" --non-interactive
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/sa.json"
