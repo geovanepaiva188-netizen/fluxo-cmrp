@@ -1,6 +1,7 @@
 name: Robô do Fluxo
 # Lê as contas LocaWeb conectadas no app e atualiza o Firebase.
-# Repositório público: a cada 10 minutos. Repositório privado: troque para '*/15 * * * *' para ficar no plano grátis.
+# O GitHub grátis costuma atrasar os agendamentos (dispara a cada 45-90 min). Por isso cada rodada fica
+# ligada ~1 hora lendo o e-mail a cada 10 min; a próxima rodada agendada espera na fila e emenda.
 on:
   schedule:
     - cron: '*/10 * * * *'
@@ -13,7 +14,7 @@ permissions:
 jobs:
   rodar:
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,4 +28,13 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
           ROBO_SEGREDO: ${{ secrets.ROBO_SEGREDO }}
-        run: python main.py
+        run: |
+          fim=$(( $(date +%s) + 55 * 60 ))
+          while true; do
+            inicio=$(date +%s)
+            python main.py || echo "rodada com erro; tenta de novo em 10 min"
+            proxima=$(( inicio + 600 ))
+            [ "$proxima" -ge "$fim" ] && break
+            espera=$(( proxima - $(date +%s) ))
+            [ "$espera" -gt 0 ] && sleep "$espera"
+          done
